@@ -4,14 +4,6 @@
 namespace Trajectory
 {
 
-enum class TrapState
-{
-    IDLE,
-    ACCEL,
-    CRUISE,
-    DECEL,
-    DONE
-};
 
 class TrapGenerator
 {
@@ -23,7 +15,7 @@ public:
     void      Run();
     double    GetPosCmd() const;
     bool      IsDone()   const;
-    TrapState GetState() const;
+
 
 private:
     // Config
@@ -32,6 +24,7 @@ private:
     double m_vel         {0.0};
     double m_accel       {0.0};
     double m_direction   {1.0};
+
 
     // Computed profile params
     double m_tAccel      {0.0};
@@ -48,8 +41,9 @@ private:
     double m_posCmd {0.0};
     std::chrono::steady_clock::time_point m_startTime;
 
-    TrapState m_state {TrapState::IDLE};
-    bool      m_start {false};
+
+    bool      m_start   {false};
+    bool      m_isDone  {true};
 };
 
 } // namespace Trajectory

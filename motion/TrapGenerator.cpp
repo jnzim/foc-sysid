@@ -21,7 +21,7 @@ void TrapGenerator::Start(double startPos, double targetPos,
     double dist = m_direction * (targetPos - startPos);
 
     m_tAccel = vel / accel;
-    m_dRamp  = accel * m_tAccel * m_tAccel;
+    m_dRamp = 0.5 * accel * m_tAccel * m_tAccel;
 
     m_triangular = (m_dRamp >= dist);
     if (m_triangular)
@@ -41,10 +41,8 @@ void TrapGenerator::Start(double startPos, double targetPos,
     m_cruiseStartPos = m_startPos + m_direction * 0.5 * m_accel * m_tAccel * m_tAccel;
     m_decelStartPos  = m_cruiseStartPos + m_direction * m_vel * m_tCruise;
 
-    if (m_state == TrapState::IDLE)
-    {
-        m_start = true;
-    }
+   m_start = true;
+   Run();
 }
 
 void TrapGenerator::Run()
@@ -52,12 +50,10 @@ void TrapGenerator::Run()
     if (m_start)
     {
         m_startTime = std::chrono::steady_clock::now();
-        m_state     = TrapState::ACCEL;
         m_start     = false;
+        m_isDone    = false;
     }
 
-    if (m_state == TrapState::IDLE || m_state == TrapState::DONE)
-        return;
 
     double t = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - m_startTime).count();
@@ -65,22 +61,23 @@ void TrapGenerator::Run()
     if (t >= m_tTotal)
     {
         m_posCmd = m_target;
-        m_state  = TrapState::DONE;
+        m_isDone = true;
+   
     }
     else if (t < m_tAccel)
     {
-        m_state  = TrapState::ACCEL;
+   
         m_posCmd = m_startPos + m_direction * 0.5 * m_accel * t * t;
     }
     else if (t < m_tAccel + m_tCruise)
     {
-        m_state      = TrapState::CRUISE;
+     
         double tC    = t - m_tAccel;
         m_posCmd     = m_cruiseStartPos + m_direction * m_vel * tC;
     }
     else
     {
-        m_state      = TrapState::DECEL;
+       
         double tD    = t - m_tAccel - m_tCruise;
         m_posCmd     = m_decelStartPos + m_direction * (m_vel * tD - 0.5 * m_accel * tD * tD);
     }
@@ -93,12 +90,8 @@ double TrapGenerator::GetPosCmd() const
 
 bool TrapGenerator::IsDone() const
 {
-    return m_state == TrapState::DONE;
+    return m_isDone;
 }
 
-TrapState TrapGenerator::GetState() const
-{
-    return m_state;
-}
 
 } // namespace Trajectory
