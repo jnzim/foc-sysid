@@ -1,21 +1,15 @@
 cmake_minimum_required(VERSION 3.16)
-project(MotionController)
+project(trap_spi)
+
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Debug)
-endif()
 
-include_directories(
-    ${CMAKE_SOURCE_DIR}/motion
+add_executable(MotionControl
+    src/main.cpp
+    src/profile.cpp
+    src/spi.cpp
 )
 
-file(GLOB_RECURSE SOURCES
-    motion/*.cpp
-    src/*.cpp
+target_include_directories(MotionControl PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
 )
-
-add_executable(MotionControl ${SOURCES})
-
-target_link_libraries(MotionControl m)
