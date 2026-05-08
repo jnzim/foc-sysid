@@ -37,17 +37,16 @@ std::vector<Sample> compute_profile(int32_t start_cnt,
     double decelStartPos  = cruiseStartPos + direction * vel * tCruise;
 
 
-std::cout << "dist      : " << dist      << "\n";
-std::cout << "tAccel    : " << tAccel    << "\n";
-std::cout << "dRamp     : " << dRamp     << "\n";
-std::cout << "triangular: " << triangular << "\n";
-std::cout << "tCruise   : " << tCruise   << "\n";
-std::cout << "tTotal    : " << tTotal    << "\n";
+    std::cout << "dist      : " << dist      << "\n";
+    std::cout << "tAccel    : " << tAccel    << "\n";
+    std::cout << "dRamp     : " << dRamp     << "\n";
+    std::cout << "triangular: " << triangular << "\n";
+    std::cout << "tCruise   : " << tCruise   << "\n";
+    std::cout << "tTotal    : " << tTotal    << "\n";
 
 
     // ── Sample profile at fixed dt ────────────────────────────────────────
     // Use integer step counter — avoids floating point accumulation error
-    // that caused the glitch at phase boundaries
     int total_steps = static_cast<int>(std::round(tTotal / dt));
 
     std::vector<Sample> profile;

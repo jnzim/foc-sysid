@@ -1,17 +1,35 @@
+// spi.cpp — Pi-side SPI2 protocol implementation
+// Raspberry Pi 4, spidev + pigpio (Pi GPIO library), C++17
+//
+// PROTOCOL SUMMARY:
+//   Every transaction is exactly 24 bytes — Pi drives clock, STM follows.
+//   Pi sends opcode in byte 0, pads remainder with 0x00.
+//   STM always returns latest TelemetryFrame on MISO during any transaction.
+//   READY signal is a GPIO on BCM pin 25 connected to STM PC13 — not a SPI byte.
+
 #include "spi.hpp"
-#include "profile.hpp"
+#include "protocol.h"
 #include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <linux/spi/spidev.h>
+#include <pigpio.h>
 #include <iostream>
 #include <algorithm>
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+static constexpr size_t TRANSACTION_BYTES = SPI2_TRANSACTION_BYTES;  // 24
+static constexpr int    READY_GPIO_PIN    = 25;    // BCM pin connected to STM PC13
+static constexpr int    READY_TIMEOUT_MS  = 500;   // max wait for READY signal
+
+// ── File descriptor ───────────────────────────────────────────────────────────
+
 static int spi_fd = -1;
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
+// ── CRC8 (Cyclic Redundancy Check 8-bit) XOR ─────────────────────────────────
+// Same algorithm as STM side — XOR across all bytes
 static uint8_t crc8(const uint8_t* data, size_t len)
 {
     uint8_t crc = 0x00;
@@ -19,158 +37,209 @@ static uint8_t crc8(const uint8_t* data, size_t len)
     return crc;
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
-
-bool spi_init(const char* device, uint32_t speed_hz)
-{
-    spi_fd = open(device, O_RDWR);
-    if (spi_fd < 0) { perror("spi_init: open"); return false; }
-
-    uint8_t  mode  = SPI_MODE_1;
-    uint8_t  bits  = 8;
-    uint32_t speed = speed_hz;
-
-    ioctl(spi_fd, SPI_IOC_WR_MODE,          &mode);
-    ioctl(spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
-    ioctl(spi_fd, SPI_IOC_WR_MAX_SPEED_HZ,  &speed);
-    return true;
-}
-
+// ── Raw 24-byte SPI transfer ──────────────────────────────────────────────────
+// Pi sends tx[24] on MOSI, receives rx[24] on MISO simultaneously.
+// STM always returns latest TelemetryFrame on MISO regardless of opcode.
 bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len)
 {
     struct spi_ioc_transfer tr = {};
     tr.tx_buf        = (unsigned long)tx;
     tr.rx_buf        = (unsigned long)rx;
     tr.len           = len;
-    tr.speed_hz      = 1000000;
     tr.bits_per_word = 8;
     return ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr) >= 0;
 }
 
-static bool wait_for_ready(int timeout_ms = 500)
+// ── Wait for READY GPIO ───────────────────────────────────────────────────────
+// STM asserts PC13 high when ring buffer drops to 2048 samples remaining.
+// Pi must respond with a refill block.
+static bool wait_for_ready(int timeout_ms = READY_TIMEOUT_MS)
 {
-    uint8_t tx = 0x00;
-    uint8_t rx = 0x00;
     int elapsed = 0;
     while (elapsed < timeout_ms)
     {
-        spi_transfer_raw(&tx, &rx, 1);
-        if (rx == 0x05) return true;
+        if (gpioRead(READY_GPIO_PIN) == 1) return true;
         usleep(1000);
         elapsed++;
     }
-    std::cerr << "spi: timeout waiting for STM32 READY\n";
+    std::cerr << "spi: timeout waiting for READY on GPIO " << READY_GPIO_PIN << "\n";
     return false;
 }
 
+// =============================================================================
+// spi_init
+// Open spidev device, configure SPI mode, init pigpio for READY GPIO input.
+// device   — e.g. "/dev/spidev0.0"
+// speed_hz — SPI clock rate, e.g. 8000000 for 8 MHz
+// =============================================================================
+bool spi_init(const char* device, uint32_t speed_hz)
+{
+    // init pigpio — must be called before any gpioRead/gpioWrite
+    if (gpioInitialise() < 0) {
+        std::cerr << "spi_init: gpioInitialise failed\n";
+        return false;
+    }
+
+    // configure READY pin as input — no pull, STM drives it
+    gpioSetMode(READY_GPIO_PIN, PI_INPUT);
+    gpioSetPullUpDown(READY_GPIO_PIN, PI_PUD_OFF);
+
+    // open spidev device
+    spi_fd = open(device, O_RDWR);
+    if (spi_fd < 0) { perror("spi_init: open"); return false; }
+
+    uint8_t  mode  = SPI_MODE_0;   // CPOL (Clock Polarity) = 0, CPHA (Clock Phase) = 0
+    uint8_t  bits  = 8;            // 8-bit frames
+    uint32_t speed = speed_hz;
+
+    ioctl(spi_fd, SPI_IOC_WR_MODE,          &mode);
+    ioctl(spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
+    ioctl(spi_fd, SPI_IOC_WR_MAX_SPEED_HZ,  &speed);
+
+    return true;
+}
+
+// =============================================================================
+// spi_stream_profile
+// Stream a precomputed trajectory profile to the STM in blocks.
+// Default block_size matches the STM ring buffer refill size (2048 samples).
+//
+// Per block:
+//   1. Send BLOCK_HDR (0x03) — tells STM how many samples are coming
+//   2. Send N DATA (0x04) packets — one per sample, pos + vel_ff
+//   3. Send READY_ACK (0x05) — acknowledge the block was sent
+// =============================================================================
 bool spi_stream_profile(const std::vector<Sample>& profile, size_t block_size)
 {
-    size_t total_samples = profile.size();
-    size_t total_blocks  = (total_samples + block_size - 1) / block_size;
+    size_t total    = profile.size();
+    size_t n_blocks = (total + block_size - 1) / block_size;
 
-    std::cout << "Streaming " << total_samples << " samples ("
-              << total_samples / 1000.0 << "s) in "
-              << total_blocks << " blocks\n";
+    std::cout << "Streaming " << total << " samples in "
+              << n_blocks << " blocks of " << block_size << "\n";
 
-    for (size_t block_idx = 0; block_idx < total_blocks; block_idx++)
+    for (size_t blk = 0; blk < n_blocks; blk++)
     {
-        size_t sample_start = block_idx * block_size;
-        size_t sample_end   = std::min(sample_start + block_size, total_samples);
-        size_t n_samples    = sample_end - sample_start;
+        size_t start = blk * block_size;
+        size_t end   = std::min(start + block_size, total);
+        size_t n     = end - start;
 
-        // ── Header packet (9 bytes) ───────────────────────────────────────
-        //   [0]    0xAB        sync
-        //   [1]    0x03        msg type: block header
-        //   [2-3]  uint16_t    block index       (big-endian)
-        //   [4-5]  uint16_t    samples this block (big-endian)
-        //   [6-7]  uint16_t    total blocks       (big-endian)
-        //   [8]    CRC8
-        uint8_t header[9] = {};
-        header[0] = 0xAB;
-        header[1] = 0x03;
-        header[2] = (block_idx    >> 8) & 0xFF;
-        header[3] =  block_idx          & 0xFF;
-        header[4] = (n_samples    >> 8) & 0xFF;
-        header[5] =  n_samples          & 0xFF;
-        header[6] = (total_blocks >> 8) & 0xFF;
-        header[7] =  total_blocks       & 0xFF;
-        header[8] = crc8(header, 8);
+        // ── BLOCK_HDR packet ──────────────────────────────────────────────
+        // [0] opcode 0x03
+        // [1] sample count high byte
+        // [2] sample count low byte
+        // [3] CRC8 over bytes 0-2
+        // [4-23] 0x00 pad
+        uint8_t hdr_tx[TRANSACTION_BYTES] = {};
+        uint8_t hdr_rx[TRANSACTION_BYTES] = {};
 
-        uint8_t rx9[9] = {};
-        if (!spi_transfer_raw(header, rx9, sizeof(header))) {
-            std::cerr << "spi: header failed at block " << block_idx << "\n";
+        hdr_tx[0] = SPI2_OP_BLOCK_HDR;
+        hdr_tx[1] = (n >> 8) & 0xFF;
+        hdr_tx[2] =  n       & 0xFF;
+        hdr_tx[3] = crc8(hdr_tx, 3);
+
+        if (!spi_transfer_raw(hdr_tx, hdr_rx, TRANSACTION_BYTES)) {
+            std::cerr << "spi: BLOCK_HDR failed at block " << blk << "\n";
             return false;
         }
 
-        if (!wait_for_ready()) return false;
-
-        // ── Data packet ───────────────────────────────────────────────────
-        //   [0]              0xAB           sync
-        //   [1]              0x04           msg type: block data
-        //   [2..N*8+1]       Sample × N     pos(int32) + vel(int32), big-endian
-        //   [N*8+2]          CRC8
-        size_t data_len = 2 + (n_samples * 8) + 1;  // 8 bytes per sample
-        std::vector<uint8_t> pkt(data_len, 0);
-
-        pkt[0] = 0xAB;
-        pkt[1] = 0x04;
-
-        for (size_t i = 0; i < n_samples; i++)
+        // ── DATA packets ──────────────────────────────────────────────────
+        // [0]    opcode 0x04
+        // [1-4]  pos_cmd little-endian int32_t encoder counts
+        // [5-8]  vel_ff  little-endian int32_t counts/sec
+        // [9]    CRC8 over bytes 0-8
+        // [10-23] 0x00 pad
+        for (size_t i = 0; i < n; i++)
         {
-            const Sample& s = profile[sample_start + i];
-            size_t off = 2 + i * 8;
+            const Sample& s = profile[start + i];
 
-            // Position — big-endian int32_t
-            pkt[off + 0] = (s.pos >> 24) & 0xFF;
-            pkt[off + 1] = (s.pos >> 16) & 0xFF;
-            pkt[off + 2] = (s.pos >>  8) & 0xFF;
-            pkt[off + 3] =  s.pos        & 0xFF;
+            uint8_t tx[TRANSACTION_BYTES] = {};
+            uint8_t rx[TRANSACTION_BYTES] = {};
 
-            // Velocity — big-endian int32_t
-            pkt[off + 4] = (s.vel >> 24) & 0xFF;
-            pkt[off + 5] = (s.vel >> 16) & 0xFF;
-            pkt[off + 6] = (s.vel >>  8) & 0xFF;
-            pkt[off + 7] =  s.vel        & 0xFF;
+            tx[0] = SPI2_OP_DATA;
+
+            // little-endian — LSB (Least Significant Byte) first, matches STM32 native
+            tx[1] =  s.pos        & 0xFF;
+            tx[2] = (s.pos >>  8) & 0xFF;
+            tx[3] = (s.pos >> 16) & 0xFF;
+            tx[4] = (s.pos >> 24) & 0xFF;
+
+            tx[5] =  s.vel        & 0xFF;
+            tx[6] = (s.vel >>  8) & 0xFF;
+            tx[7] = (s.vel >> 16) & 0xFF;
+            tx[8] = (s.vel >> 24) & 0xFF;
+
+            tx[9] = crc8(tx, 9);
+
+            if (!spi_transfer_raw(tx, rx, TRANSACTION_BYTES)) {
+                std::cerr << "spi: DATA failed block " << blk
+                          << " sample " << i << "\n";
+                return false;
+            }
         }
 
-        pkt[data_len - 1] = crc8(pkt.data(), data_len - 1);
+        // ── READY_ACK ─────────────────────────────────────────────────────
+        uint8_t ack_tx[TRANSACTION_BYTES] = {};
+        uint8_t ack_rx[TRANSACTION_BYTES] = {};
+        ack_tx[0] = SPI2_OP_READY_ACK;
+        spi_transfer_raw(ack_tx, ack_rx, TRANSACTION_BYTES);
 
-        std::vector<uint8_t> rx(data_len, 0);
-        if (!spi_transfer_raw(pkt.data(), rx.data(), data_len)) {
-            std::cerr << "spi: data failed at block " << block_idx << "\n";
-            return false;
-        }
-
-        if (block_idx < total_blocks - 1) {
-            if (!wait_for_ready()) return false;
-        }
-
-        std::cout << "  block " << block_idx + 1 << "/" << total_blocks
-                  << "  samples " << sample_start << "-" << sample_end - 1
-                  << "\n";
+        std::cout << "  block " << blk + 1 << "/" << n_blocks
+                  << "  samples " << start << "-" << end - 1 << "\n";
     }
 
     std::cout << "Stream complete.\n";
     return true;
 }
 
-bool spi_send_position(int32_t counts)
+// =============================================================================
+// spi_telem_poll
+// Send TELEM_REQ (0x06), receive TelemetryFrame on MISO.
+// Call every 1ms from a timer or poll loop for continuous telemetry logging.
+// Returns false on SPI transfer error.
+// =============================================================================
+bool spi_telem_poll(TelemetryFrame* frame)
 {
-    uint8_t pkt[8] = {};
-    pkt[0] = 0xAB;
-    pkt[1] = 0x01;
-    pkt[2] = (counts >> 24) & 0xFF;
-    pkt[3] = (counts >> 16) & 0xFF;
-    pkt[4] = (counts >>  8) & 0xFF;
-    pkt[5] =  counts        & 0xFF;
-    pkt[6] = 0x00;
-    pkt[7] = crc8(pkt, 7);
+    uint8_t tx[TRANSACTION_BYTES] = {};
+    uint8_t rx[TRANSACTION_BYTES] = {};
 
-    uint8_t rx[8] = {};
-    return spi_transfer_raw(pkt, rx, sizeof(pkt));
+    tx[0] = SPI2_OP_TELEM_REQ;   // 0x06, bytes 1-23 are 0x00 pad
+
+    if (!spi_transfer_raw(tx, rx, TRANSACTION_BYTES)) return false;
+
+    // cast raw bytes directly to TelemetryFrame
+    // safe — struct is packed, 24 bytes, same byte order on both sides
+    memcpy(frame, rx, sizeof(TelemetryFrame));
+    return true;
 }
 
+// =============================================================================
+// spi_send_position
+// Send a single static position setpoint — used for comms validation testing
+// before full trajectory streaming is implemented.
+// =============================================================================
+bool spi_send_position(int32_t counts)
+{
+    uint8_t tx[TRANSACTION_BYTES] = {};
+    uint8_t rx[TRANSACTION_BYTES] = {};
+
+    tx[0] = SPI2_OP_DATA;
+
+    tx[1] =  counts        & 0xFF;
+    tx[2] = (counts >>  8) & 0xFF;
+    tx[3] = (counts >> 16) & 0xFF;
+    tx[4] = (counts >> 24) & 0xFF;
+
+    // vel_ff = 0 for static position test
+    tx[9] = crc8(tx, 9);
+
+    return spi_transfer_raw(tx, rx, TRANSACTION_BYTES);
+}
+
+// =============================================================================
+// spi_close
+// =============================================================================
 void spi_close()
 {
-    if (spi_fd >= 0) close(spi_fd);
+    if (spi_fd >= 0) { close(spi_fd); spi_fd = -1; }
+    gpioTerminate();
 }

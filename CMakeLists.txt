@@ -13,3 +13,5 @@ add_executable(MotionControl
 target_include_directories(MotionControl PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
+
+target_link_libraries(MotionControl PRIVATE pigpio)
