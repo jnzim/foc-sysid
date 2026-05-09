@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <vector>
 #include "profile.hpp"
+#include "protocol.h"
 
 // open the spidev device (e.g. "/dev/spidev0.0") at the given clock speed
 bool spi_init(const char* device, uint32_t speed_hz);
@@ -16,6 +17,9 @@ bool spi_send_position(int32_t counts);
 // raw SPI transfer — Pi drives clock, tx and rx are both len bytes
 // STM always returns latest TelemetryFrame on MISO during any transaction
 bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len);
+
+
+bool spi_telem_poll(TelemetryFrame* frame);
 
 // close the spidev file descriptor
 void spi_close();

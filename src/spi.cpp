@@ -202,12 +202,12 @@ bool spi_telem_poll(TelemetryFrame* frame)
     uint8_t tx[TRANSACTION_BYTES] = {};
     uint8_t rx[TRANSACTION_BYTES] = {};
 
-    tx[0] = SPI2_OP_TELEM_REQ;   // 0x06, bytes 1-23 are 0x00 pad
+    tx[0] = SPI2_OP_TELEM_REQ;
 
     if (!spi_transfer_raw(tx, rx, TRANSACTION_BYTES)) return false;
 
-    // cast raw bytes directly to TelemetryFrame
-    // safe — struct is packed, 24 bytes, same byte order on both sides
+    usleep(50000);   // 50ms — give STM time to re-arm
+
     memcpy(frame, rx, sizeof(TelemetryFrame));
     return true;
 }
@@ -233,6 +233,7 @@ bool spi_send_position(int32_t counts)
     tx[9] = crc8(tx, 9);
 
     return spi_transfer_raw(tx, rx, TRANSACTION_BYTES);
+    
 }
 
 // =============================================================================
