@@ -99,6 +99,73 @@ bool spi_init(const char* device, uint32_t speed_hz)
     return true;
 }
 
+
+// =============================================================================
+// spi_stream_block
+// Stream a slice of a profile starting at offset, sending count samples.
+// Used for initial fill (offset=0, count=4096) and refills (count=2048).
+// Returns number of samples actually sent.
+// =============================================================================
+size_t spi_stream_block(const std::vector<Sample>& profile, size_t offset, size_t count)
+{
+    size_t end = std::min(offset + count, profile.size());
+    size_t n   = end - offset;
+
+    if (n == 0) return 0;
+
+    // ── BLOCK_HDR ─────────────────────────────────────────────────────────
+    uint8_t hdr_tx[TRANSACTION_BYTES] = {};
+    uint8_t hdr_rx[TRANSACTION_BYTES] = {};
+    hdr_tx[0] = SPI2_OP_BLOCK_HDR;
+    hdr_tx[1] = (n >> 8) & 0xFF;
+    hdr_tx[2] =  n       & 0xFF;
+    hdr_tx[3] = crc8(hdr_tx, 3);
+
+    if (!spi_transfer_raw(hdr_tx, hdr_rx, TRANSACTION_BYTES)) {
+        std::cerr << "spi: BLOCK_HDR failed at offset " << offset << "\n";
+        return 0;
+    }
+    usleep(200);
+
+    // ── DATA packets ──────────────────────────────────────────────────────
+    for (size_t i = 0; i < n; i++) {
+        const Sample& s = profile[offset + i];
+
+        uint8_t tx[TRANSACTION_BYTES] = {};
+        uint8_t rx[TRANSACTION_BYTES] = {};
+
+        tx[0] = SPI2_OP_DATA;
+        tx[1] =  s.pos        & 0xFF;
+        tx[2] = (s.pos >>  8) & 0xFF;
+        tx[3] = (s.pos >> 16) & 0xFF;
+        tx[4] = (s.pos >> 24) & 0xFF;
+        tx[5] =  s.vel        & 0xFF;
+        tx[6] = (s.vel >>  8) & 0xFF;
+        tx[7] = (s.vel >> 16) & 0xFF;
+        tx[8] = (s.vel >> 24) & 0xFF;
+        tx[9] = crc8(tx, 9);
+
+        if (!spi_transfer_raw(tx, rx, TRANSACTION_BYTES)) {
+            std::cerr << "spi: DATA failed offset " << offset + i << "\n";
+            return i;
+        }
+        usleep(200);
+    }
+
+    // ── READY_ACK ─────────────────────────────────────────────────────────
+    uint8_t ack_tx[TRANSACTION_BYTES] = {};
+    uint8_t ack_rx[TRANSACTION_BYTES] = {};
+    ack_tx[0] = SPI2_OP_READY_ACK;
+    spi_transfer_raw(ack_tx, ack_rx, TRANSACTION_BYTES);
+
+    std::cout << "  streamed " << n << " samples"
+              << " [" << offset << "-" << end - 1 << "]\n";
+
+    return n;
+}
+
+
+
 // =============================================================================
 // spi_stream_profile
 // Stream a precomputed trajectory profile to the STM in blocks.

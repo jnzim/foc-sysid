@@ -37,12 +37,11 @@ int main()
         return 1;
     }
 
-    // ── 5. Stream initial profile to STM ─────────────────────────────────
-    std::cout << "Streaming profile...\n";
-    spi_stream_profile(profile, 2048);
-    std::cout << "Stream complete\n";
+    // ── 5. Fill buffer to 4096 — motor starts on first sample ────────────
+    std::cout << "Streaming initial block...\n";
+    size_t sent = spi_stream_block(profile, 0, 4096);
 
-    // ── 6. Telem loop — run until full profile echoed back ───────────────
+    // ── 6. Telem + refill loop until full profile echoed back ─────────────
     std::cout << "Running...\n";
     TelemetryFrame frame;
     std::ofstream telem_csv("telem.csv");
@@ -55,6 +54,14 @@ int main()
             std::cout << "pos_cmd: " << frame.pos_cmd
                       << "  t: "     << frame.timestamp_ms << "\n";
         }
+
+        if (spi_ready() && sent < profile.size()) {
+            size_t chunk = std::min(profile.size() - sent, (size_t)2048);
+            sent += spi_stream_block(profile, sent, chunk);
+            std::cout << "Refilled — sent " << sent
+                      << "/" << profile.size() << "\n";
+        }
+
         usleep(1000);
     }
 
