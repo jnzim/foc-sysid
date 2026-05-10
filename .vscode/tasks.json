@@ -1,0 +1,31 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Clean and Build",
+            "type": "shell",
+            "command": "cd ${workspaceFolder}/build && cmake .. && make clean && make -j4",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "clean",
+            "type": "shell",
+            "command": "cd ${workspaceFolder}/build && make clean",
+            "problemMatcher": []
+        },
+        {
+            "label": "rebuild",
+            "type": "shell",
+            "command": "cd ${workspaceFolder}/build && cmake .. && make clean && make -j4",
+            "problemMatcher": ["$gcc"]
+        }
+    ]
+}
