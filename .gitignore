@@ -3,4 +3,4 @@ build/
 *.o
 *.a
 *.out
-.vscode/
+.vscode/*.csv
