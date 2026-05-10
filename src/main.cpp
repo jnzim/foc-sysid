@@ -11,9 +11,10 @@ int main()
 {
     // ── 1. Convert mm inputs to encoder counts ────────────────────────────
     int32_t start  = MACHINE.mm_to_counts(0.0);
-    int32_t target = MACHINE.mm_to_counts(5.0);
-    int32_t vel    = MACHINE.mm_to_counts(1.0);
-    int32_t accel  = MACHINE.mm_to_counts(100.0);
+    int32_t target = MACHINE.mm_to_counts(10.0);
+    int32_t vel    = MACHINE.mm_to_counts(8.0);
+    int32_t accel  = MACHINE.mm_to_counts(8.0);
+    
 
     // ── 2. Precompute full profile ────────────────────────────────────────
     auto profile = compute_profile(start, target, vel, accel);
@@ -37,22 +38,30 @@ int main()
         return 1;
     }
 
+    
+    // ── PC13 check ───────────────────────────────────────────────────────
+    std::cout << "PC13 state: " << spi_ready() << "\n";
+    usleep(100000);  // 100ms
+    std::cout << "PC13 state: " << spi_ready() << "\n";
+
     // ── 5. Fill buffer to 4096 — motor starts on first sample ────────────
     std::cout << "Streaming initial block...\n";
     size_t sent = spi_stream_block(profile, 0, 4096);
 
-    // ── 6. Telem + refill loop until full profile echoed back ─────────────
+   // ── 6. Telem + refill loop until move complete ────────────────────────
     std::cout << "Running...\n";
-    TelemetryFrame frame;
+    TelemetryFrame frame = {};
     std::ofstream telem_csv("telem.csv");
-    telem_csv << "t,pos_cmd\n";
+    telem_csv << "t,pos_cmd,samples_consumed\n";
 
-    for (size_t i = 0; i < profile.size(); i++) {
+    while (frame.samples_consumed < (uint32_t)profile.size()) {
         if (spi_telem_poll(&frame)) {
-            telem_csv << frame.timestamp_ms << ","
-                      << frame.pos_cmd      << "\n";
-            std::cout << "pos_cmd: " << frame.pos_cmd
-                      << "  t: "     << frame.timestamp_ms << "\n";
+            telem_csv << frame.timestamp_ms      << ","
+                      << frame.pos_cmd           << ","
+                      << frame.samples_consumed  << "\n";
+            std::cout << "pos_cmd: "  << frame.pos_cmd
+                      << "  consumed: " << frame.samples_consumed
+                      << "  t: "      << frame.timestamp_ms << "\n";
         }
 
         if (spi_ready() && sent < profile.size()) {
