@@ -141,7 +141,7 @@ bool spi_stream_profile(const std::vector<Sample>& profile, size_t block_size)
             std::cerr << "spi: BLOCK_HDR failed at block " << blk << "\n";
             return false;
         }
-
+        usleep(200);  // 500us
         // ── DATA packets ──────────────────────────────────────────────────
         // [0]    opcode 0x04
         // [1-4]  pos_cmd little-endian int32_t encoder counts
@@ -206,7 +206,7 @@ bool spi_telem_poll(TelemetryFrame* frame)
 
     if (!spi_transfer_raw(tx, rx, TRANSACTION_BYTES)) return false;
 
-    usleep(50000);   // 50ms — give STM time to re-arm
+//usleep(50000);   // 50ms — give STM time to re-arm
 
     memcpy(frame, rx, sizeof(TelemetryFrame));
     return true;
