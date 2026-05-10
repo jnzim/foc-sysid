@@ -18,8 +18,11 @@ bool spi_send_position(int32_t counts);
 // STM always returns latest TelemetryFrame on MISO during any transaction
 bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len);
 
-
+// send TELEM_REQ opcode, receive latest TelemetryFrame from STM on MISO
 bool spi_telem_poll(TelemetryFrame* frame);
 
-// close the spidev file descriptor
+// returns true if PC13 READY signal is asserted low — STM ring buffer needs refill
+bool spi_ready(void);
+
+// close the spidev file descriptor and terminate pigpio
 void spi_close();

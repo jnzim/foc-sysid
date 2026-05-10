@@ -37,23 +37,29 @@ int main()
         return 1;
     }
 
-    // ── 5. Stream profile to STM ──────────────────────────────────────────
+    // ── 5. Stream initial profile to STM ─────────────────────────────────
     std::cout << "Streaming profile...\n";
-    spi_stream_profile(profile, 256);
+    spi_stream_profile(profile, 2048);
     std::cout << "Stream complete\n";
 
-    // ── 6. Poll telem — verify STM received data ──────────────────────────
-    std::cout << "Polling telem...\n";
+    // ── 6. Telem loop — run until full profile echoed back ───────────────
+    std::cout << "Running...\n";
     TelemetryFrame frame;
-    for (int i = 0; i < 10; i++) {
+    std::ofstream telem_csv("telem.csv");
+    telem_csv << "t,pos_cmd\n";
+
+    for (size_t i = 0; i < profile.size(); i++) {
         if (spi_telem_poll(&frame)) {
-            std::cout << "pos_cmd: 0x" << std::hex << frame.pos_cmd
-                      << "  pos_fbk: 0x" << frame.pos_fbk
-                      << "  state: " << std::dec << (int)frame.drive_state << "\n";
+            telem_csv << frame.timestamp_ms << ","
+                      << frame.pos_cmd      << "\n";
+            std::cout << "pos_cmd: " << frame.pos_cmd
+                      << "  t: "     << frame.timestamp_ms << "\n";
         }
         usleep(1000);
     }
 
+    telem_csv.close();
+    std::cout << "Move complete. Written to telem.csv\n";
     spi_close();
     return 0;
 }

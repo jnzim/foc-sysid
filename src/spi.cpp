@@ -237,6 +237,16 @@ bool spi_send_position(int32_t counts)
 }
 
 // =============================================================================
+// spi_ready
+// Returns true if STM PC13 READY signal is asserted low.
+// STM asserts low when ring buffer drops to 2048 samples — Pi must refill.
+// =============================================================================
+bool spi_ready(void)
+{
+    return gpioRead(READY_GPIO_PIN) == 0;
+}
+
+// =============================================================================
 // spi_close
 // =============================================================================
 void spi_close()
