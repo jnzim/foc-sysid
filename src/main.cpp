@@ -49,37 +49,38 @@ int main()
         std::cout << "Running...\n";
         TelemetryFrame frame = {};
         std::ofstream telem_csv("telem.csv");
-        telem_csv << "t,pos_cmd,samples_consumed\n";
+        telem_csv << "t,pos_cmd,pos_fbk,vel_fbk,samples_consumed\n";
+        uint32_t last_consumed = 0;
+        uint32_t t0            = 0;
+        bool     t0_set        = false;
 
         while (frame.samples_consumed < (uint32_t)profile.size()) {
             if (spi_telem_poll(&frame)) {
-                telem_csv << frame.timestamp_ms     << ","
-                          << frame.pos_cmd          << ","
-                          << frame.samples_consumed << "\n";
-                std::cout << "pos_cmd: "    << frame.pos_cmd
-                          << "  consumed: " << frame.samples_consumed
-                          << "  t: "        << frame.timestamp_ms << "\n";
+                if (frame.samples_consumed != last_consumed) {
+                    if (!t0_set) { t0 = frame.timestamp_ms; t0_set = true; }
+                    telem_csv << (frame.timestamp_ms - t0) << ","
+                              << frame.pos_cmd             << ","
+                              << frame.pos_fbk             << ","
+                              << frame.vel_fbk             << ","
+                              << frame.samples_consumed    << "\n";
+                    last_consumed = frame.samples_consumed;
+                }
             }
-
             if (spi_ready() && sent < profile.size()) {
                 size_t chunk = std::min(profile.size() - sent, (size_t)2048);
                 sent += spi_stream_block(profile, sent, chunk);
                 std::cout << "Refilled — sent " << sent
                           << "/" << profile.size() << "\n";
             }
-
-            usleep(1000);
         }
-
         telem_csv.close();
         std::cout << "Move complete. Written to telem.csv\n";
 
-       // ── 7. Plot trajectory ─────────────────────────────────────────────────
-        std::cout << "Plotting...\n";
-        system("python3 /home/jz/py-script/plotprof.py "
-        "/home/jz/MotionController/profile.csv "
-        "/home/jz/MotionController/telem.csv");
-
+        // ── 7. Plot trajectory ────────────────────────────────────────────
+        int ret = system("python3 /home/jz/py-script/plotprof.py "
+                         "/home/jz/MotionController/profile.csv "
+                         "/home/jz/MotionController/telem.csv");
+        std::cout << "Plot exit code: " << ret << "\n";
     }
 
     spi_close();
