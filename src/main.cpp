@@ -6,6 +6,7 @@
 #include <fstream>
 #include <string>
 #include <unistd.h>
+#include <climits>
 
 int main()
 {
@@ -46,13 +47,13 @@ int main()
         size_t sent = spi_stream_block(profile, 0, 4096);
 
         // ── 6. Telem + refill loop ────────────────────────────────────────
-        // ── 6. Telem + refill loop ────────────────────────────────────────
         std::cout << "Running...\n";
-        TelemetryFrame frame = {};
+        TelemetryFrame frame  = {};
         std::ofstream telem_csv("telem.csv");
         telem_csv << "t,pos_cmd,pos_fbk,vel_fbk,samples_consumed\n";
-        uint32_t t0     = 0;
-        bool     t0_set = false;
+        uint32_t t0       = 0;
+        bool     t0_set   = false;
+        int32_t  last_fbk = INT32_MIN;
 
         while (frame.samples_consumed < (uint32_t)profile.size()) {
             if (spi_telem_poll(&frame)) {
@@ -60,12 +61,13 @@ int main()
                     t0     = frame.timestamp_ms;
                     t0_set = true;
                 }
-                if (t0_set) {
+                if (t0_set && frame.pos_fbk != last_fbk) {
                     telem_csv << (frame.timestamp_ms - t0) << ","
                               << frame.pos_cmd             << ","
                               << frame.pos_fbk             << ","
                               << frame.vel_fbk             << ","
                               << frame.samples_consumed    << "\n";
+                    last_fbk = frame.pos_fbk;
                 }
             }
             if (spi_ready() && sent < profile.size()) {
@@ -75,7 +77,6 @@ int main()
                           << "/" << profile.size() << "\n";
             }
         }
-    
         telem_csv.close();
         std::cout << "Move complete. Written to telem.csv\n";
 
