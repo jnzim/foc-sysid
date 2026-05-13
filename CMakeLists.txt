@@ -4,14 +4,13 @@ project(trap_spi)
 set(CMAKE_CXX_STANDARD 17)
 
 
-add_executable(MotionControl
+add_executable(drive
     src/main.cpp
     src/profile.cpp
     src/spi.cpp
 )
 
-target_include_directories(MotionControl PRIVATE
+target_include_directories(drive PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
-
-target_link_libraries(MotionControl PRIVATE pigpio)
+target_link_libraries(drive PRIVATE lgpio)

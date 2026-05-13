@@ -7,6 +7,7 @@
 #include <string>
 #include <unistd.h>
 #include <climits>
+#include <chrono>
 
 int main()
 {
@@ -42,9 +43,22 @@ int main()
         csv.close();
         std::cout << "Written to profile.csv\n";
 
+
+
+
+
+
+
+
         // ── 5. Fill buffer ────────────────────────────────────────────────
         std::cout << "Streaming...\n";
+        // add this:
+        auto t_stream_start = std::chrono::steady_clock::now();
         size_t sent = spi_stream_block(profile, 0, 4096);
+        auto t_stream_end = std::chrono::steady_clock::now();
+        std::cout << "Stream took " 
+          << std::chrono::duration_cast<std::chrono::milliseconds>(t_stream_end - t_stream_start).count()
+          << "ms\n";
 
         // ── 6. Telem + refill loop ────────────────────────────────────────
         std::cout << "Running...\n";
@@ -55,7 +69,7 @@ int main()
         bool     t0_set   = false;
         int32_t  last_fbk = INT32_MIN;
 
-        while (frame.samples_consumed < (uint32_t)profile.size()) {
+        while (frame.samples_consumed < (uint32_t)profile.size() -1 ) {
             if (spi_telem_poll(&frame)) {
                 if (!t0_set && frame.samples_consumed > 0) {
                     t0     = frame.timestamp_ms;
@@ -76,14 +90,25 @@ int main()
                 std::cout << "Refilled — sent " << sent
                           << "/" << profile.size() << "\n";
             }
+
+            static auto t_last = std::chrono::steady_clock::now();
+            auto t_now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_last).count() > 500) {
+                std::cout << "consumed=" << frame.samples_consumed
+                          << "/" << profile.size()
+                          << "  pos_fbk=" << frame.pos_fbk
+                          << "  ts=" << frame.timestamp_ms
+                          << "\n";
+                t_last = t_now;
+            }
         }
         telem_csv.close();
         std::cout << "Move complete. Written to telem.csv\n";
 
         // ── 7. Plot trajectory ────────────────────────────────────────────
-        int ret = system("python3 /home/jz/py-script/plotprof.py "
-                         "/home/jz/MotionController/profile.csv "
-                         "/home/jz/MotionController/telem.csv");
+        int ret = system("python3 /home/jz/trajectory-streamer/py-script/plotprof.py "
+                 "/home/jz/trajectory-streamer/build/profile.csv "
+                 "/home/jz/trajectory-streamer/build/telem.csv");
         std::cout << "Plot exit code: " << ret << "\n";
     }
 
