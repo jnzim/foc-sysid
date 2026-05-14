@@ -39,7 +39,6 @@ static uint8_t crc8(const uint8_t* data, size_t len)
 }
 
 // ── Raw 24-byte SPI transfer ──────────────────────────────────────────────────
-
 bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len)
 {
     struct spi_ioc_transfer tr = {};
@@ -47,6 +46,7 @@ bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len)
     tr.rx_buf        = (unsigned long)rx;
     tr.len           = len;
     tr.bits_per_word = 8;
+    tr.cs_change     = 1;   // deassert CS after each transfer
     return ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr) >= 0;
 }
 
@@ -123,9 +123,10 @@ size_t spi_stream_block(const std::vector<Sample>& profile, size_t offset, size_
     }
 
     std::cout << "HDR rx: ";
-for (int i = 0; i < 8; i++)
-    std::cout << std::hex << (int)hdr_rx[i] << " ";
-std::cout << std::dec << "\n";
+    for (int i = 0; i < 8; i++)
+        std::cout << std::hex << (int)hdr_rx[i] << " ";
+        std::cout << std::dec << "\n";
+
     usleep(200);
 
     // ── DATA packets ──────────────────────────────────────────────────────
@@ -146,7 +147,8 @@ std::cout << std::dec << "\n";
         tx[8] = (s.vel >> 24) & 0xFF;
         tx[9] = crc8(tx, 9);
 
-        if (!spi_transfer_raw(tx, rx, TRANSACTION_BYTES)) {
+        if (!spi_transfer_raw(tx, rx, TRANSACTION_BYTES)) 
+        {
             std::cerr << "spi: DATA failed offset " << offset + i << "\n";
             return i;
         }
@@ -274,8 +276,7 @@ bool spi_send_position(int32_t counts)
 // =============================================================================
 bool spi_ready(void)
 {
-   return true;
-    //return lgGpioRead(gpio_h, READY_GPIO_PIN) == 0;
+    return lgGpioRead(gpio_h, READY_GPIO_PIN) == 0;
 }
 
 // =============================================================================
