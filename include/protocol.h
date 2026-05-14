@@ -34,7 +34,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  drive_state;
     uint8_t  fault_flags;
     uint32_t samples_consumed;  // incremented each ring_pop — Pi uses this to detect move complete
-    uint8_t  _pad[2];           // 2 bytes remaining, always 0x00
+    uint8_t  dbg_exti12;           // 2 bytes remaining, always 0x00
 } TelemetryFrame;
 
 // =============================================================================

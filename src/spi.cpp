@@ -121,6 +121,11 @@ size_t spi_stream_block(const std::vector<Sample>& profile, size_t offset, size_
         std::cerr << "spi: BLOCK_HDR failed at offset " << offset << "\n";
         return 0;
     }
+
+    std::cout << "HDR rx: ";
+for (int i = 0; i < 8; i++)
+    std::cout << std::hex << (int)hdr_rx[i] << " ";
+std::cout << std::dec << "\n";
     usleep(200);
 
     // ── DATA packets ──────────────────────────────────────────────────────
@@ -269,7 +274,8 @@ bool spi_send_position(int32_t counts)
 // =============================================================================
 bool spi_ready(void)
 {
-    return lgGpioRead(gpio_h, READY_GPIO_PIN) == 0;
+   return true;
+    //return lgGpioRead(gpio_h, READY_GPIO_PIN) == 0;
 }
 
 // =============================================================================
