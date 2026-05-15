@@ -57,7 +57,8 @@ int main()
         // ── 5. Stream initial block ───────────────────────────────────────
         std::cout << "Streaming...\n";
         auto   t0_stream = std::chrono::steady_clock::now();
-        size_t sent      = spi_stream_block(profile, 0, 4096);
+        //size_t sent      = spi_stream_block(profile, 0, 4096);
+        size_t sent = spi_stream_block(profile, 0, 4096, nullptr, nullptr, nullptr, nullptr);
         auto   t1_stream = std::chrono::steady_clock::now();
         std::cout << "Stream took "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(
