@@ -1,5 +1,9 @@
 // spi.cpp — Pi-side SPI2 protocol implementation
 // Raspberry Pi 5, spidev + lgpio (Pi 5 compatible), C++17
+//
+// CS is controlled manually via GPIO8 (CE0) using lgpio.
+// spidev automatic CS is disabled (cs_change = 0, no kernel CS toggling).
+// This guarantees CS pulses between every 24-byte transaction.
 
 #include "spi.hpp"
 #include "protocol.h"
@@ -15,6 +19,7 @@
 
 static constexpr size_t TRANSACTION_BYTES = SPI2_TRANSACTION_BYTES;
 static constexpr int    READY_GPIO_PIN    = 25;
+static constexpr int    CS_GPIO_PIN       = 7;   // GPIO7, manual CS
 static constexpr int    READY_TIMEOUT_MS  = 500;
 
 static int spi_fd  = -1;
@@ -27,16 +32,23 @@ static uint8_t crc8(const uint8_t* data, size_t len)
     return crc;
 }
 
-// ── Raw 24-byte SPI transfer ──────────────────────────────────────────────────
+// ── Raw 24-byte SPI transfer — manual CS via GPIO ────────────────────────────
 bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len)
 {
+    lgGpioWrite(gpio_h, CS_GPIO_PIN, 0);    // assert CS low
+
     struct spi_ioc_transfer tr = {};
     tr.tx_buf        = (unsigned long)tx;
     tr.rx_buf        = (unsigned long)rx;
     tr.len           = len;
     tr.bits_per_word = 8;
-    tr.cs_change     = 1;
-    return ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr) >= 0;
+    tr.cs_change     = 0;                   // we control CS manually
+
+    int ret = ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr);
+
+    lgGpioWrite(gpio_h, CS_GPIO_PIN, 1);    // deassert CS high
+
+    return ret >= 0;
 }
 
 // =============================================================================
@@ -50,16 +62,24 @@ bool spi_init(const char* device, uint32_t speed_hz)
         return false;
     }
 
+    // READY input — Pi reads PC13 from STM
     int rc = lgGpioClaimInput(gpio_h, LG_SET_PULL_NONE, READY_GPIO_PIN);
     if (rc < 0) {
-        std::cerr << "spi_init: lgGpioClaimInput failed: " << lguErrorText(rc) << "\n";
+        std::cerr << "spi_init: lgGpioClaimInput(READY) failed: " << lguErrorText(rc) << "\n";
+        return false;
+    }
+
+    // CS output — start deasserted (high)
+    rc = lgGpioClaimOutput(gpio_h, 0, CS_GPIO_PIN, 1);
+    if (rc < 0) {
+        std::cerr << "spi_init: lgGpioClaimOutput(CS) failed: " << lguErrorText(rc) << "\n";
         return false;
     }
 
     spi_fd = open(device, O_RDWR);
     if (spi_fd < 0) { perror("spi_init: open"); return false; }
 
-    uint8_t  mode  = SPI_MODE_0;
+    uint8_t  mode  = SPI_MODE_0 | SPI_NO_CS;  // disable kernel CS — we drive it manually
     uint8_t  bits  = 8;
     uint32_t speed = speed_hz;
 
@@ -72,8 +92,6 @@ bool spi_init(const char* device, uint32_t speed_hz)
 
 // =============================================================================
 // spi_stream_block
-// Streams a block of trajectory samples to the STM.
-// Logs telem from MISO during streaming into csv if provided.
 // =============================================================================
 size_t spi_stream_block(const std::vector<Sample>& profile,
                         size_t offset, size_t count,
@@ -196,6 +214,7 @@ bool spi_ready(void)
 // =============================================================================
 void spi_close()
 {
+    lgGpioWrite(gpio_h, CS_GPIO_PIN, 1);    // deassert CS on close
     if (spi_fd >= 0) { close(spi_fd); spi_fd = -1; }
     if (gpio_h >= 0) { lgGpiochipClose(gpio_h); gpio_h = -1; }
 }
