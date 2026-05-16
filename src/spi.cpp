@@ -16,10 +16,11 @@
 #include <iostream>
 #include <algorithm>
 #include <fstream>
+#include <chrono>
 
 static constexpr size_t TRANSACTION_BYTES = SPI2_TRANSACTION_BYTES;
 static constexpr int    READY_GPIO_PIN    = 25;
-static constexpr int    CS_GPIO_PIN       = 7;   // GPIO7, manual CS
+static constexpr int    CS_GPIO_PIN       = 7;   // GPIO7 = CE0
 static constexpr int    READY_TIMEOUT_MS  = 500;
 
 static int spi_fd  = -1;
@@ -42,13 +43,12 @@ bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len)
     tr.rx_buf        = (unsigned long)rx;
     tr.len           = len;
     tr.bits_per_word = 8;
-    tr.cs_change     = 0;                   // we control CS manually
 
-    int ret = ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr);
+    bool ok = ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr) >= 0;
 
     lgGpioWrite(gpio_h, CS_GPIO_PIN, 1);    // deassert CS high
 
-    return ret >= 0;
+return ok;
 }
 
 // =============================================================================
@@ -114,7 +114,7 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
         std::cerr << "spi: BLOCK_HDR failed at offset " << offset << "\n";
         return 0;
     }
-    usleep(200);
+    usleep(200); // Allow time for STM DMA reset and drive enable
 
     // ── DATA packets ──────────────────────────────────────────────────────
     for (size_t i = 0; i < n; i++) {
@@ -157,8 +157,23 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
             }
         }
 
-        usleep(200);
+        usleep(100);
+
     }
+
+ // ── Wait for STM to consume final sample ──────────────────────────────
+    uint8_t poll_tx[TRANSACTION_BYTES] = {};
+    uint8_t poll_rx[TRANSACTION_BYTES] = {};
+    poll_tx[0] = SPI2_OP_TELEM_REQ;
+    TelemetryFrame f;
+    int retries = 100;
+    do {
+        spi_transfer_raw(poll_tx, poll_rx, TRANSACTION_BYTES);
+        memcpy(&f, poll_rx, sizeof(TelemetryFrame));
+        usleep(100);
+    } while (f.samples_consumed < n && --retries > 0);
+    if (retries == 0) std::cerr << "spi: timeout waiting for final sample\n";
+
 
     // ── READY_ACK ─────────────────────────────────────────────────────────
     uint8_t ack_tx[TRANSACTION_BYTES] = {};

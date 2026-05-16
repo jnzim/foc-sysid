@@ -4,8 +4,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-profile_file = sys.argv[1] if len(sys.argv) > 1 else "/home/jz/MotionController/profile.csv"
-telem_file   = sys.argv[2] if len(sys.argv) > 2 else "/home/jz/MotionController/telem.csv"
+profile_file = sys.argv[1] if len(sys.argv) > 1 else "/home/jz/trajectory-streamer/build/profile.csv"
+telem_file   = sys.argv[2] if len(sys.argv) > 2 else "/home/jz/trajectory-streamer/build/telem.csv"
 
 def load_csv(path, cols):
     rows = []
@@ -42,5 +42,5 @@ ax2.set_ylabel('velocity (counts/s)')
 ax2.legend()
 
 fig.tight_layout()
-plt.savefig('/home/jz/trajectory-streamer/build/profile_plot.png', dpi=150)
+plt.savefig('/home/jz/trajectory-streamer/docs/profile_plot.png', dpi=150)
 print("Done — profile_plot.png")
