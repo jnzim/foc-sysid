@@ -72,10 +72,10 @@ int main()
 
         // ── 7. Stream initial block ───────────────────────────────────────
         std::cout << "Streaming...\n";
-        auto   t0_stream = std::chrono::steady_clock::now();
-        size_t sent      = spi_stream_block(profile, 0, 4096,
-                                            &telem_csv, &telem_t0, &t0_set, &last_fbk);
-        auto   t1_stream = std::chrono::steady_clock::now();
+        auto t0_stream = std::chrono::steady_clock::now();
+        size_t sent    = spi_stream_block(profile, 0, 4096,
+                                          &telem_csv, &telem_t0, &t0_set, &last_fbk);
+        auto t1_stream = std::chrono::steady_clock::now();
         std::cout << "Stream took "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(
                          t1_stream - t0_stream).count()
@@ -83,8 +83,9 @@ int main()
 
         // ── 8. Telem + refill loop ────────────────────────────────────────
         std::cout << "Running...\n";
-        TelemetryFrame frame = {};
-        auto t_last = std::chrono::steady_clock::now();
+        TelemetryFrame frame  = {};
+        auto t_last           = std::chrono::steady_clock::now();
+        auto t_run_start      = std::chrono::steady_clock::now();  // ── poll loop timer
 
         while (frame.samples_consumed < (uint32_t)profile.size()) {
 
@@ -105,6 +106,8 @@ int main()
                     last_fbk = frame.pos_fbk;
                 }
             }
+
+            usleep(500);
 
             if (spi_ready() && sent < profile.size()) {
                 std::cout << "READY triggered\n";
@@ -129,6 +132,14 @@ int main()
                 t_last = t_now;
             }
         }
+
+        auto t_run_end = std::chrono::steady_clock::now();
+        std::cout << "Poll loop took "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(
+                         t_run_end - t_run_start).count()
+                  << "ms  (expected ~"
+                  << (int)(profile.size())
+                  << "ms)\n";
 
         telem_csv.close();
         std::cout << "Move complete. Written to docs/telem.csv\n";
