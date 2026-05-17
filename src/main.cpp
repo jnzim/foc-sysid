@@ -30,7 +30,7 @@ int main()
 
     // ── 2. Convert mm inputs to encoder counts ────────────────────────────
     int32_t start  = MACHINE.mm_to_counts(0.0);
-    int32_t target = MACHINE.mm_to_counts(10.0);
+    int32_t target = MACHINE.mm_to_counts(22.0);
     int32_t vel    = MACHINE.mm_to_counts(8.0);
     int32_t accel  = MACHINE.mm_to_counts(8.0);
 
