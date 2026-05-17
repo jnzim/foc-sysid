@@ -1,5 +1,6 @@
 #include "config.hpp"
 #include "profile.hpp"
+#include "chirp.hpp"
 #include "spi.hpp"
 #include "protocol.h"
 #include <iostream>
@@ -28,7 +29,7 @@ int main()
         return 1;
     }
 
-    // ── 2. Convert mm inputs to encoder counts ────────────────────────────
+    // ── 2. Trapezoidal move parameters ───────────────────────────────────
     int32_t start  = MACHINE.mm_to_counts(0.0);
     int32_t target = MACHINE.mm_to_counts(22.0);
     int32_t vel    = MACHINE.mm_to_counts(8.0);
@@ -38,24 +39,38 @@ int main()
     std::signal(SIGTERM, sig_handler);
 
     while (true) {
-        std::cout << "\nPress Enter to run move, q to quit: ";
+        std::cout << "\nPress Enter to run move, c for chirp, q to quit: ";
         std::string input;
         std::getline(std::cin, input);
         if (input == "q") break;
 
+        bool chirp_mode = (input == "c");
+
         // ── 3. Precompute profile ─────────────────────────────────────────
-        auto profile = compute_profile(start, target, vel, accel);
+        std::vector<Sample> profile;
+        if (chirp_mode) {
+            profile = compute_chirp(200, 0.1, 250.0, 10.0);
+           
+            std::cout << "Chirp: 0.1→250Hz, ±200 counts, 10s\n";
+        } else {
+            profile = compute_profile(start, target, vel, accel);
+        }
         std::cout << profile.size() << " samples ("
                   << profile.size() / 1000.0 << "s)\n";
 
         // ── 4. Clean previous run output ──────────────────────────────────
-        std::remove((std::string(DOCS_DIR) + "/profile.csv").c_str());
-        std::remove((std::string(DOCS_DIR) + "/telem.csv").c_str());
-        std::remove((std::string(DOCS_DIR) + "/profile_plot.png").c_str());
+        std::string prof_csv  = chirp_mode ? "/chirp.csv"       : "/profile.csv";
+        std::string telem_f   = chirp_mode ? "/chirp_telem.csv" : "/telem.csv";
+        std::string plot_out  = chirp_mode ? "/bode.png"        : "/profile_plot.png";
+        std::string plot_script = chirp_mode ? "/plotbode.py"   : "/plotprof.py";
+
+        std::remove((std::string(DOCS_DIR) + prof_csv).c_str());
+        std::remove((std::string(DOCS_DIR) + telem_f).c_str());
+        std::remove((std::string(DOCS_DIR) + plot_out).c_str());
 
         // ── 5. Write profile CSV ──────────────────────────────────────────
         {
-            std::ofstream csv(std::string(DOCS_DIR) + "/profile.csv");
+            std::ofstream csv(std::string(DOCS_DIR) + prof_csv);
             csv << "sample,t,pos,vel\n";
             for (size_t i = 0; i < profile.size(); i++)
                 csv << i << "," << i * 0.001 << ","
@@ -63,19 +78,19 @@ int main()
         }
 
         // ── 6. Open telem CSV ─────────────────────────────────────────────
-        std::ofstream telem_csv(std::string(DOCS_DIR) + "/telem.csv");
+        std::ofstream telem_csv(std::string(DOCS_DIR) + telem_f);
         telem_csv << "t,pos_cmd,pos_fbk,vel_fbk,pos_err,i_q_fbk,v_q_cmd,samples_consumed\n";
 
         uint32_t telem_t0 = 0;
         bool     t0_set   = false;
         int32_t  last_fbk = INT32_MIN;
 
-        // ── 7. Stream initial block (with BLOCK_HDR) ──────────────────────
+        // ── 7. Stream initial block ───────────────────────────────────────
         std::cout << "Streaming...\n";
         auto t0_stream = std::chrono::steady_clock::now();
         size_t sent    = spi_stream_block(profile, 0, 4096,
                                           &telem_csv, &telem_t0, &t0_set, &last_fbk,
-                                          true);   // send header — resets STM ring
+                                          true);
         auto t1_stream = std::chrono::steady_clock::now();
         std::cout << "Stream took "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -83,7 +98,7 @@ int main()
                   << "ms\n";
 
         // ── 8. Telem + refill loop ────────────────────────────────────────
-        std::cout << "Running...\n";
+        std::cout << (chirp_mode ? "Running chirp...\n" : "Running...\n");
         TelemetryFrame frame  = {};
         auto t_last           = std::chrono::steady_clock::now();
         auto t_run_start      = std::chrono::steady_clock::now();
@@ -115,7 +130,7 @@ int main()
                 size_t chunk = std::min(profile.size() - sent, (size_t)2048);
                 sent += spi_stream_block(profile, sent, chunk,
                                          &telem_csv, &telem_t0, &t0_set, &last_fbk,
-                                         false);  // no header — refill only
+                                         false);
                 std::cout << "Refilled — sent " << sent
                           << "/" << profile.size() << "\n";
             }
@@ -127,8 +142,6 @@ int main()
                           << "/" << profile.size()
                           << "  pos_fbk=" << frame.pos_fbk
                           << "  pos_err=" << frame.pos_err
-                          << "  i_q_fbk=" << frame.i_q_fbk
-                          << "  v_q_cmd=" << frame.v_q_cmd
                           << "  ts="      << frame.timestamp_ms
                           << "\n";
                 t_last = t_now;
@@ -136,20 +149,20 @@ int main()
         }
 
         auto t_run_end = std::chrono::steady_clock::now();
-        std::cout << "Poll loop took "
+        std::cout << "Complete in "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(
                          t_run_end - t_run_start).count()
-                  << "ms  (expected ~"
-                  << (int)(profile.size())
-                  << "ms)\n";
+                  << "ms\n";
 
         telem_csv.close();
-        std::cout << "Move complete. Written to docs/telem.csv\n";
 
         // ── 9. Plot ───────────────────────────────────────────────────────
-        int ret = system((std::string("python3 ") + SCRIPT_DIR + "/plotprof.py " +
-                          DOCS_DIR + "/profile.csv " +
-                          DOCS_DIR + "/telem.csv").c_str());
+        std::string plot_cmd = std::string("python3 ") + SCRIPT_DIR + plot_script + " " +
+                               DOCS_DIR + telem_f;
+        if (!chirp_mode)
+            plot_cmd += std::string(" ") + DOCS_DIR + prof_csv;
+
+        int ret = system(plot_cmd.c_str());
         std::cout << "Plot exit code: " << ret << "\n";
     }
 
