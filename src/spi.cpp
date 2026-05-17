@@ -1,9 +1,9 @@
 // spi.cpp — Pi-side SPI2 protocol implementation
 // Raspberry Pi 5, spidev + lgpio (Pi 5 compatible), C++17
 //
-// CS is controlled manually via GPIO8 (CE0) using lgpio.
-// spidev automatic CS is disabled (cs_change = 0, no kernel CS toggling).
-// This guarantees CS pulses between every 24-byte transaction.
+// CS is controlled manually via GPIO7 (pin 26) using lgpio.
+// spidev automatic CS is disabled (SPI_NO_CS).
+// Verified on logic analyzer: NSS toggles between every 24-byte packet.
 
 #include "spi.hpp"
 #include "protocol.h"
@@ -16,11 +16,10 @@
 #include <iostream>
 #include <algorithm>
 #include <fstream>
-#include <chrono>
 
 static constexpr size_t TRANSACTION_BYTES = SPI2_TRANSACTION_BYTES;
-static constexpr int    READY_GPIO_PIN    = 25;
-static constexpr int    CS_GPIO_PIN       = 7;   // GPIO7 = CE0
+static constexpr int    READY_GPIO_PIN    = 25;     // PC13 from STM, active low
+static constexpr int    CS_GPIO_PIN       = 7;      // GPIO7 = Pi pin 26
 static constexpr int    READY_TIMEOUT_MS  = 500;
 
 static int spi_fd  = -1;
@@ -36,7 +35,7 @@ static uint8_t crc8(const uint8_t* data, size_t len)
 // ── Raw 24-byte SPI transfer — manual CS via GPIO ────────────────────────────
 bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len)
 {
-    lgGpioWrite(gpio_h, CS_GPIO_PIN, 0);    // assert CS low
+    lgGpioWrite(gpio_h, CS_GPIO_PIN, 0);        // assert CS low
 
     struct spi_ioc_transfer tr = {};
     tr.tx_buf        = (unsigned long)tx;
@@ -46,9 +45,9 @@ bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len)
 
     bool ok = ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr) >= 0;
 
-    lgGpioWrite(gpio_h, CS_GPIO_PIN, 1);    // deassert CS high
+    lgGpioWrite(gpio_h, CS_GPIO_PIN, 1);        // deassert CS high
 
-return ok;
+    return ok;
 }
 
 // =============================================================================
@@ -62,15 +61,13 @@ bool spi_init(const char* device, uint32_t speed_hz)
         return false;
     }
 
-    // READY input — Pi reads PC13 from STM
     int rc = lgGpioClaimInput(gpio_h, LG_SET_PULL_NONE, READY_GPIO_PIN);
     if (rc < 0) {
         std::cerr << "spi_init: lgGpioClaimInput(READY) failed: " << lguErrorText(rc) << "\n";
         return false;
     }
 
-    // CS output — start deasserted (high)
-    rc = lgGpioClaimOutput(gpio_h, 0, CS_GPIO_PIN, 1);
+    rc = lgGpioClaimOutput(gpio_h, 0, CS_GPIO_PIN, 1);     // start deasserted
     if (rc < 0) {
         std::cerr << "spi_init: lgGpioClaimOutput(CS) failed: " << lguErrorText(rc) << "\n";
         return false;
@@ -79,7 +76,7 @@ bool spi_init(const char* device, uint32_t speed_hz)
     spi_fd = open(device, O_RDWR);
     if (spi_fd < 0) { perror("spi_init: open"); return false; }
 
-    uint8_t  mode  = SPI_MODE_0 | SPI_NO_CS;  // disable kernel CS — we drive it manually
+    uint8_t  mode  = SPI_MODE_0 | SPI_NO_CS;   // kernel CS disabled — driven manually
     uint8_t  bits  = 8;
     uint32_t speed = speed_hz;
 
@@ -114,7 +111,7 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
         std::cerr << "spi: BLOCK_HDR failed at offset " << offset << "\n";
         return 0;
     }
-    usleep(200); // Allow time for STM DMA reset and drive enable
+    usleep(200);
 
     // ── DATA packets ──────────────────────────────────────────────────────
     for (size_t i = 0; i < n; i++) {
@@ -158,22 +155,7 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
         }
 
         usleep(100);
-
     }
-
- // ── Wait for STM to consume final sample ──────────────────────────────
-    uint8_t poll_tx[TRANSACTION_BYTES] = {};
-    uint8_t poll_rx[TRANSACTION_BYTES] = {};
-    poll_tx[0] = SPI2_OP_TELEM_REQ;
-    TelemetryFrame f;
-    int retries = 100;
-    do {
-        spi_transfer_raw(poll_tx, poll_rx, TRANSACTION_BYTES);
-        memcpy(&f, poll_rx, sizeof(TelemetryFrame));
-        usleep(1000);
-    } while (f.samples_consumed < n && --retries > 0);
-    if (retries == 0) std::cerr << "spi: timeout waiting for final sample\n";
-
 
     // ── READY_ACK ─────────────────────────────────────────────────────────
     uint8_t ack_tx[TRANSACTION_BYTES] = {};
@@ -229,7 +211,7 @@ bool spi_ready(void)
 // =============================================================================
 void spi_close()
 {
-    lgGpioWrite(gpio_h, CS_GPIO_PIN, 1);    // deassert CS on close
+    lgGpioWrite(gpio_h, CS_GPIO_PIN, 1);
     if (spi_fd >= 0) { close(spi_fd); spi_fd = -1; }
     if (gpio_h >= 0) { lgGpiochipClose(gpio_h); gpio_h = -1; }
 }

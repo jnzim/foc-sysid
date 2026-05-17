@@ -9,6 +9,10 @@
 #include <climits>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
+
+static constexpr const char* DOCS_DIR   = "/home/jz/trajectory-streamer/docs";
+static constexpr const char* SCRIPT_DIR = "/home/jz/trajectory-streamer/py-script";
 
 static void sig_handler(int)
 {
@@ -44,25 +48,29 @@ int main()
         std::cout << profile.size() << " samples ("
                   << profile.size() / 1000.0 << "s)\n";
 
-        // ── 4. Write profile CSV ──────────────────────────────────────────
+        // ── 4. Clean previous run output ──────────────────────────────────
+        std::remove((std::string(DOCS_DIR) + "/profile.csv").c_str());
+        std::remove((std::string(DOCS_DIR) + "/telem.csv").c_str());
+        std::remove((std::string(DOCS_DIR) + "/profile_plot.png").c_str());
+
+        // ── 5. Write profile CSV ──────────────────────────────────────────
         {
-            std::ofstream csv("/home/jz/trajectory-streamer/docs/profile.csv");
+            std::ofstream csv(std::string(DOCS_DIR) + "/profile.csv");
             csv << "sample,t,pos,vel\n";
             for (size_t i = 0; i < profile.size(); i++)
                 csv << i << "," << i * 0.001 << ","
                     << profile[i].pos << "," << profile[i].vel << "\n";
         }
-        std::cout << "Written to docs/profile.csv\n";
 
-        // ── 5. Open telem CSV before streaming ────────────────────────────
-        std::ofstream telem_csv("/home/jz/trajectory-streamer/docs/telem.csv");
+        // ── 6. Open telem CSV ─────────────────────────────────────────────
+        std::ofstream telem_csv(std::string(DOCS_DIR) + "/telem.csv");
         telem_csv << "t,pos_cmd,pos_fbk,vel_fbk,samples_consumed\n";
 
         uint32_t telem_t0 = 0;
         bool     t0_set   = false;
         int32_t  last_fbk = INT32_MIN;
 
-        // ── 6. Stream initial block — capture telem during stream ─────────
+        // ── 7. Stream initial block ───────────────────────────────────────
         std::cout << "Streaming...\n";
         auto   t0_stream = std::chrono::steady_clock::now();
         size_t sent      = spi_stream_block(profile, 0, 4096,
@@ -73,18 +81,12 @@ int main()
                          t1_stream - t0_stream).count()
                   << "ms\n";
 
-        // ── 7. Telem + refill loop ────────────────────────────────────────
+        // ── 8. Telem + refill loop ────────────────────────────────────────
         std::cout << "Running...\n";
         TelemetryFrame frame = {};
-        bool     first_iter = true;
-        auto     t_last     = std::chrono::steady_clock::now();
+        auto t_last = std::chrono::steady_clock::now();
 
         while (frame.samples_consumed < (uint32_t)profile.size()) {
-
-            if (first_iter) {
-                std::cout << "first iter consumed=" << frame.samples_consumed << "\n";
-                first_iter = false;
-            }
 
             if (spi_telem_poll(&frame)) {
                 if (!t0_set && frame.samples_consumed > 0) {
@@ -117,7 +119,6 @@ int main()
                           << "/" << profile.size()
                           << "  pos_fbk=" << frame.pos_fbk
                           << "  ts="      << frame.timestamp_ms
-                          << "  exti12="  << frame.dbg_exti12
                           << "\n";
                 t_last = t_now;
             }
@@ -126,10 +127,10 @@ int main()
         telem_csv.close();
         std::cout << "Move complete. Written to docs/telem.csv\n";
 
-        // ── 8. Plot ───────────────────────────────────────────────────────
-        int ret = system("python3 /home/jz/trajectory-streamer/py-script/plotprof.py "
-                         "/home/jz/trajectory-streamer/docs/profile.csv "
-                         "/home/jz/trajectory-streamer/docs/telem.csv");
+        // ── 9. Plot ───────────────────────────────────────────────────────
+        int ret = system((std::string("python3 ") + SCRIPT_DIR + "/plotprof.py " +
+                          DOCS_DIR + "/profile.csv " +
+                          DOCS_DIR + "/telem.csv").c_str());
         std::cout << "Plot exit code: " << ret << "\n";
     }
 
