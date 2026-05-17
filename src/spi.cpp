@@ -18,9 +18,8 @@
 #include <fstream>
 
 static constexpr size_t TRANSACTION_BYTES = SPI2_TRANSACTION_BYTES;
-static constexpr int    READY_GPIO_PIN    = 25;     // PC13 from STM, active low
-static constexpr int    CS_GPIO_PIN       = 7;      // GPIO7 = Pi pin 26
-static constexpr int    READY_TIMEOUT_MS  = 500;
+static constexpr int    READY_GPIO_PIN    = 25;
+static constexpr int    CS_GPIO_PIN       = 7;
 
 static int spi_fd  = -1;
 static int gpio_h  = -1;
@@ -102,29 +101,34 @@ static void write_telem_row(std::ofstream& csv, const TelemetryFrame& f, uint32_
 
 // =============================================================================
 // spi_stream_block
+// send_header=true  → first block of a new move (sends BLOCK_HDR, resets STM ring)
+// send_header=false → refill block (DATA packets only, no ring reset)
 // =============================================================================
 size_t spi_stream_block(const std::vector<Sample>& profile,
                         size_t offset, size_t count,
                         std::ofstream* csv,
-                        uint32_t* telem_t0, bool* t0_set, int32_t* last_fbk)
+                        uint32_t* telem_t0, bool* t0_set, int32_t* last_fbk,
+                        bool send_header)
 {
     size_t end = std::min(offset + count, profile.size());
     size_t n   = end - offset;
     if (n == 0) return 0;
 
-    // ── BLOCK_HDR ─────────────────────────────────────────────────────────
-    uint8_t hdr_tx[TRANSACTION_BYTES] = {};
-    uint8_t hdr_rx[TRANSACTION_BYTES] = {};
-    hdr_tx[0] = SPI2_OP_BLOCK_HDR;
-    hdr_tx[1] = (n >> 8) & 0xFF;
-    hdr_tx[2] =  n       & 0xFF;
-    hdr_tx[3] = crc8(hdr_tx, 3);
+    // ── BLOCK_HDR — first block only ─────────────────────────────────────
+    if (send_header) {
+        uint8_t hdr_tx[TRANSACTION_BYTES] = {};
+        uint8_t hdr_rx[TRANSACTION_BYTES] = {};
+        hdr_tx[0] = SPI2_OP_BLOCK_HDR;
+        hdr_tx[1] = (n >> 8) & 0xFF;
+        hdr_tx[2] =  n       & 0xFF;
+        hdr_tx[3] = crc8(hdr_tx, 3);
 
-    if (!spi_transfer_raw(hdr_tx, hdr_rx, TRANSACTION_BYTES)) {
-        std::cerr << "spi: BLOCK_HDR failed at offset " << offset << "\n";
-        return 0;
+        if (!spi_transfer_raw(hdr_tx, hdr_rx, TRANSACTION_BYTES)) {
+            std::cerr << "spi: BLOCK_HDR failed at offset " << offset << "\n";
+            return 0;
+        }
+        usleep(200);
     }
-    usleep(200);
 
     // ── DATA packets ──────────────────────────────────────────────────────
     for (size_t i = 0; i < n; i++) {
@@ -172,7 +176,8 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
     spi_transfer_raw(ack_tx, ack_rx, TRANSACTION_BYTES);
 
     std::cout << "  streamed " << n << " samples"
-              << " [" << offset << "-" << end - 1 << "]\n";
+              << " [" << offset << "-" << end - 1 << "]"
+              << (send_header ? " (with header)" : " (refill)") << "\n";
 
     return n;
 }

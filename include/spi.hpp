@@ -8,20 +8,21 @@
 // open the spidev device (e.g. "/dev/spidev0.0") at the given clock speed
 bool spi_init(const char* device, uint32_t speed_hz);
 
-
-
+// stream a block of trajectory samples to the STM ring buffer
+// send_header=true  → first block of a new move (sends BLOCK_HDR, resets STM ring)
+// send_header=false → refill block (DATA packets only, no ring reset, no telem corruption)
 size_t spi_stream_block(const std::vector<Sample>& profile,
                         size_t offset, size_t count,
-                        std::ofstream* csv = nullptr,
-                        uint32_t* telem_t0 = nullptr,
-                        bool* t0_set = nullptr,
-                        int32_t* last_fbk = nullptr);
+                        std::ofstream* csv      = nullptr,
+                        uint32_t* telem_t0      = nullptr,
+                        bool* t0_set            = nullptr,
+                        int32_t* last_fbk       = nullptr,
+                        bool send_header        = true);
 
 // send a single position setpoint — used for testing before full streaming
 bool spi_send_position(int32_t counts);
 
-// raw SPI transfer — Pi drives clock, tx and rx are both len bytes
-// STM always returns latest TelemetryFrame on MISO during any transaction
+// raw SPI transfer
 bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len);
 
 // send TELEM_REQ opcode, receive latest TelemetryFrame from STM on MISO
@@ -30,5 +31,5 @@ bool spi_telem_poll(TelemetryFrame* frame);
 // returns true if PC13 READY signal is asserted low — STM ring buffer needs refill
 bool spi_ready(void);
 
-// close the spidev file descriptor and terminate pigpio
+// close the spidev file descriptor
 void spi_close();

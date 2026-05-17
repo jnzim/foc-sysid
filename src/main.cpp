@@ -70,11 +70,12 @@ int main()
         bool     t0_set   = false;
         int32_t  last_fbk = INT32_MIN;
 
-        // ── 7. Stream initial block ───────────────────────────────────────
+        // ── 7. Stream initial block (with BLOCK_HDR) ──────────────────────
         std::cout << "Streaming...\n";
         auto t0_stream = std::chrono::steady_clock::now();
         size_t sent    = spi_stream_block(profile, 0, 4096,
-                                          &telem_csv, &telem_t0, &t0_set, &last_fbk);
+                                          &telem_csv, &telem_t0, &t0_set, &last_fbk,
+                                          true);   // send header — resets STM ring
         auto t1_stream = std::chrono::steady_clock::now();
         std::cout << "Stream took "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -85,7 +86,7 @@ int main()
         std::cout << "Running...\n";
         TelemetryFrame frame  = {};
         auto t_last           = std::chrono::steady_clock::now();
-        auto t_run_start      = std::chrono::steady_clock::now();  // ── poll loop timer
+        auto t_run_start      = std::chrono::steady_clock::now();
 
         while (frame.samples_consumed < (uint32_t)profile.size()) {
 
@@ -110,10 +111,11 @@ int main()
             usleep(500);
 
             if (spi_ready() && sent < profile.size()) {
-                std::cout << "READY triggered\n";
+                std::cout << "READY triggered — refilling\n";
                 size_t chunk = std::min(profile.size() - sent, (size_t)2048);
                 sent += spi_stream_block(profile, sent, chunk,
-                                         &telem_csv, &telem_t0, &t0_set, &last_fbk);
+                                         &telem_csv, &telem_t0, &t0_set, &last_fbk,
+                                         false);  // no header — refill only
                 std::cout << "Refilled — sent " << sent
                           << "/" << profile.size() << "\n";
             }
