@@ -50,7 +50,6 @@ int main()
         std::vector<Sample> profile;
         if (chirp_mode) {
             profile = compute_chirp(200, 0.1, 250.0, 10.0);
-           
             std::cout << "Chirp: 0.1→250Hz, ±200 counts, 10s\n";
         } else {
             profile = compute_profile(start, target, vel, accel);
@@ -59,10 +58,10 @@ int main()
                   << profile.size() / 1000.0 << "s)\n";
 
         // ── 4. Clean previous run output ──────────────────────────────────
-        std::string prof_csv  = chirp_mode ? "/chirp.csv"       : "/profile.csv";
-        std::string telem_f   = chirp_mode ? "/chirp_telem.csv" : "/telem.csv";
-        std::string plot_out  = chirp_mode ? "/bode.png"        : "/profile_plot.png";
-        std::string plot_script = chirp_mode ? "/plotbode.py"   : "/plotprof.py";
+        std::string prof_csv    = chirp_mode ? "/chirp.csv"       : "/profile.csv";
+        std::string telem_f     = chirp_mode ? "/chirp_telem.csv" : "/telem.csv";
+        std::string plot_out    = chirp_mode ? "/bode.png"        : "/profile_plot.png";
+        std::string plot_script = chirp_mode ? "/plotbode.py"     : "/plotprof.py";
 
         std::remove((std::string(DOCS_DIR) + prof_csv).c_str());
         std::remove((std::string(DOCS_DIR) + telem_f).c_str());
@@ -156,11 +155,10 @@ int main()
 
         telem_csv.close();
 
-        // ── 9. Plot ───────────────────────────────────────────────────────
+        // ── 9. Plot — profile CSV first, telem CSV second ─────────────────
         std::string plot_cmd = std::string("python3 ") + SCRIPT_DIR + plot_script + " " +
+                               DOCS_DIR + prof_csv + " " +
                                DOCS_DIR + telem_f;
-        if (!chirp_mode)
-            plot_cmd += std::string(" ") + DOCS_DIR + prof_csv;
 
         int ret = system(plot_cmd.c_str());
         std::cout << "Plot exit code: " << ret << "\n";
