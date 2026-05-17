@@ -2,9 +2,9 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Clean and Build",
+            "label": "Clean Build Run",
             "type": "shell",
-            "command": "cd ${workspaceFolder}/build && cmake .. && make clean && make -j4",
+            "command": "rm -rf ${workspaceFolder}/build && mkdir ${workspaceFolder}/build && cd ${workspaceFolder}/build && cmake .. && make -j4 && ./drive",
             "group": {
                 "kind": "build",
                 "isDefault": true
@@ -18,13 +18,13 @@
         {
             "label": "clean",
             "type": "shell",
-            "command": "cd ${workspaceFolder}/build && make clean",
+            "command": "rm -rf ${workspaceFolder}/build",
             "problemMatcher": []
         },
         {
             "label": "rebuild",
             "type": "shell",
-            "command": "cd ${workspaceFolder}/build && cmake .. && make clean && make -j4",
+            "command": "rm -rf ${workspaceFolder}/build && mkdir ${workspaceFolder}/build && cd ${workspaceFolder}/build && cmake .. && make -j4",
             "problemMatcher": ["$gcc"]
         }
     ]

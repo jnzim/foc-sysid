@@ -36,17 +36,15 @@ std::vector<Sample> compute_profile(int32_t start_cnt,
     double cruiseStartPos = start + direction * dRamp;
     double decelStartPos  = cruiseStartPos + direction * vel * tCruise;
 
-
-    std::cout << "dist      : " << dist      << "\n";
-    std::cout << "tAccel    : " << tAccel    << "\n";
-    std::cout << "dRamp     : " << dRamp     << "\n";
+    std::cout << "dist      : " << dist       << "\n";
+    std::cout << "tAccel    : " << tAccel     << "\n";
+    std::cout << "dRamp     : " << dRamp      << "\n";
     std::cout << "triangular: " << triangular << "\n";
-    std::cout << "tCruise   : " << tCruise   << "\n";
-    std::cout << "tTotal    : " << tTotal    << "\n";
-
+    std::cout << "tCruise   : " << tCruise    << "\n";
+    std::cout << "tTotal    : " << tTotal     << "\n";
 
     // ── Sample profile at fixed dt ────────────────────────────────────────
-    // Use integer step counter — avoids floating point accumulation error
+    // Integer step counter — multiply not accumulate to avoid FP drift
     int total_steps = static_cast<int>(std::round(tTotal / dt));
 
     std::vector<Sample> profile;
@@ -54,26 +52,25 @@ std::vector<Sample> compute_profile(int32_t start_cnt,
 
     for (int step = 0; step <= total_steps; step++)
     {
-        double t = step * dt;   // multiply not accumulate — no drift
-
+        double t = step * dt;
         double pos, v;
 
         if (t < tAccel)
         {
-            // Accel phase — velocity ramps up linearly
+            // Accel — velocity ramps up linearly from start
             pos = start + direction * 0.5 * accel * t * t;
             v   = direction * accel * t;
         }
         else if (t < tAccel + tCruise)
         {
-            // Cruise phase — constant velocity
+            // Cruise — constant velocity
             double tC = t - tAccel;
             pos = cruiseStartPos + direction * vel * tC;
             v   = direction * vel;
         }
         else
         {
-            // Decel phase — velocity ramps down linearly
+            // Decel — velocity ramps down linearly to zero
             double tD = t - tAccel - tCruise;
             pos = decelStartPos + direction * (vel * tD - 0.5 * accel * tD * tD);
             v   = direction * (vel - accel * tD);
@@ -85,11 +82,13 @@ std::vector<Sample> compute_profile(int32_t start_cnt,
         profile.push_back(s);
     }
 
-    // Guarantee final sample is exactly at target with zero velocity
+    // Guarantee final sample lands exactly on target with zero velocity
     Sample last;
     last.pos = target_cnt;
     last.vel = 0;
     profile.push_back(last);
+
+
 
     return profile;
 }
