@@ -3,7 +3,7 @@
 //
 // CS is controlled manually via GPIO7 (pin 26) using lgpio.
 // spidev automatic CS is disabled (SPI_NO_CS).
-// Verified on logic analyzer: NSS toggles between every 24-byte packet.
+// Verified on logic analyzer: NSS toggles between every 32-byte packet.
 
 #include "spi.hpp"
 #include "protocol.h"
@@ -32,10 +32,10 @@ static uint8_t crc8(const uint8_t* data, size_t len)
     return crc;
 }
 
-// ── Raw 24-byte SPI transfer — manual CS via GPIO ────────────────────────────
+// ── Raw 32-byte SPI transfer — manual CS via GPIO ────────────────────────────
 bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len)
 {
-    lgGpioWrite(gpio_h, CS_GPIO_PIN, 0);        // assert CS low
+    lgGpioWrite(gpio_h, CS_GPIO_PIN, 0);
 
     struct spi_ioc_transfer tr = {};
     tr.tx_buf        = (unsigned long)tx;
@@ -45,7 +45,7 @@ bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len)
 
     bool ok = ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr) >= 0;
 
-    lgGpioWrite(gpio_h, CS_GPIO_PIN, 1);        // deassert CS high
+    lgGpioWrite(gpio_h, CS_GPIO_PIN, 1);
 
     return ok;
 }
@@ -67,7 +67,7 @@ bool spi_init(const char* device, uint32_t speed_hz)
         return false;
     }
 
-    rc = lgGpioClaimOutput(gpio_h, 0, CS_GPIO_PIN, 1);     // start deasserted
+    rc = lgGpioClaimOutput(gpio_h, 0, CS_GPIO_PIN, 1);
     if (rc < 0) {
         std::cerr << "spi_init: lgGpioClaimOutput(CS) failed: " << lguErrorText(rc) << "\n";
         return false;
@@ -76,7 +76,7 @@ bool spi_init(const char* device, uint32_t speed_hz)
     spi_fd = open(device, O_RDWR);
     if (spi_fd < 0) { perror("spi_init: open"); return false; }
 
-    uint8_t  mode  = SPI_MODE_0 | SPI_NO_CS;   // kernel CS disabled — driven manually
+    uint8_t  mode  = SPI_MODE_0 | SPI_NO_CS;
     uint8_t  bits  = 8;
     uint32_t speed = speed_hz;
 
@@ -85,6 +85,19 @@ bool spi_init(const char* device, uint32_t speed_hz)
     ioctl(spi_fd, SPI_IOC_WR_MAX_SPEED_HZ,  &speed);
 
     return true;
+}
+
+// ── Helper — write one telem row to CSV ──────────────────────────────────────
+static void write_telem_row(std::ofstream& csv, const TelemetryFrame& f, uint32_t t0)
+{
+    csv << (f.timestamp_ms - t0) << ","
+        << f.pos_cmd             << ","
+        << f.pos_fbk             << ","
+        << f.vel_fbk             << ","
+        << f.pos_err             << ","
+        << f.i_q_fbk             << ","
+        << f.v_q_cmd             << ","
+        << f.samples_consumed    << "\n";
 }
 
 // =============================================================================
@@ -136,7 +149,6 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
             return i;
         }
 
-        // ── Parse MISO telem during streaming ─────────────────────────────
         if (csv && telem_t0 && t0_set && last_fbk) {
             TelemetryFrame f;
             memcpy(&f, rx, sizeof(TelemetryFrame));
@@ -145,16 +157,12 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
                 *t0_set   = true;
             }
             if (*t0_set && f.pos_fbk != *last_fbk) {
-                *csv << (f.timestamp_ms - *telem_t0) << ","
-                     << f.pos_cmd                    << ","
-                     << f.pos_fbk                    << ","
-                     << f.vel_fbk                    << ","
-                     << f.samples_consumed           << "\n";
+                write_telem_row(*csv, f, *telem_t0);
                 *last_fbk = f.pos_fbk;
             }
         }
 
-        usleep(100);
+        usleep(25);
     }
 
     // ── READY_ACK ─────────────────────────────────────────────────────────

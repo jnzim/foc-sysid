@@ -64,7 +64,7 @@ int main()
 
         // ── 6. Open telem CSV ─────────────────────────────────────────────
         std::ofstream telem_csv(std::string(DOCS_DIR) + "/telem.csv");
-        telem_csv << "t,pos_cmd,pos_fbk,vel_fbk,samples_consumed\n";
+        telem_csv << "t,pos_cmd,pos_fbk,vel_fbk,pos_err,i_q_fbk,v_q_cmd,samples_consumed\n";
 
         uint32_t telem_t0 = 0;
         bool     t0_set   = false;
@@ -98,6 +98,9 @@ int main()
                               << frame.pos_cmd                   << ","
                               << frame.pos_fbk                   << ","
                               << frame.vel_fbk                   << ","
+                              << frame.pos_err                   << ","
+                              << frame.i_q_fbk                   << ","
+                              << frame.v_q_cmd                   << ","
                               << frame.samples_consumed          << "\n";
                     last_fbk = frame.pos_fbk;
                 }
@@ -118,6 +121,9 @@ int main()
                 std::cout << "consumed=" << frame.samples_consumed
                           << "/" << profile.size()
                           << "  pos_fbk=" << frame.pos_fbk
+                          << "  pos_err=" << frame.pos_err
+                          << "  i_q_fbk=" << frame.i_q_fbk
+                          << "  v_q_cmd=" << frame.v_q_cmd
                           << "  ts="      << frame.timestamp_ms
                           << "\n";
                 t_last = t_now;
