@@ -170,7 +170,7 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
     do {
         spi_transfer_raw(poll_tx, poll_rx, TRANSACTION_BYTES);
         memcpy(&f, poll_rx, sizeof(TelemetryFrame));
-        usleep(100);
+        usleep(1000);
     } while (f.samples_consumed < n && --retries > 0);
     if (retries == 0) std::cerr << "spi: timeout waiting for final sample\n";
 
