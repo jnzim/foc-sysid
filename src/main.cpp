@@ -11,12 +11,14 @@
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <cmath>
 
 static constexpr const char* DOCS_DIR   = "/home/jz/trajectory-streamer/docs";
 static constexpr const char* SCRIPT_DIR = "/home/jz/trajectory-streamer/py-script";
 
 static void sig_handler(int)
 {
+    spi_send_stop();
     spi_close();
     exit(0);
 }
@@ -39,10 +41,32 @@ int main()
     std::signal(SIGTERM, sig_handler);
 
     while (true) {
-        std::cout << "\nPress Enter to run move, c for chirp, q to quit: ";
+        std::cout << "\nEnter to run move, c=chirp, o=open loop, s=stop, q=quit: ";
         std::string input;
         std::getline(std::cin, input);
+
         if (input == "q") break;
+
+        // ── Open loop — spin motor without feedback ───────────────────────
+        // v_mag:   voltage in volts — keep low at 12V bus (1.0-1.5V)
+        // d_theta: angle per SysTick tick — 1Hz = 2π/1000 = 0.00628f
+        if (input == "o") {
+            float v_mag   = 1.5f;
+            float d_theta = 2.0f * M_PI / 1000.0f;   // 1Hz electrical
+            std::cout << "Open loop: v_mag=" << v_mag
+                      << "V  f_elec=1Hz  d_theta=" << d_theta << "\n";
+            if (!spi_send_open_loop(v_mag, d_theta))
+                std::cerr << "spi_send_open_loop failed\n";
+            continue;
+        }
+
+        // ── Stop — return STM to STATE_IDLE ──────────────────────────────
+        if (input == "s") {
+            std::cout << "Sending stop...\n";
+            if (!spi_send_stop())
+                std::cerr << "spi_send_stop failed\n";
+            continue;
+        }
 
         bool chirp_mode = (input == "c");
 
@@ -164,6 +188,7 @@ int main()
         std::cout << "Plot exit code: " << ret << "\n";
     }
 
+    spi_send_stop();
     spi_close();
     return 0;
 }

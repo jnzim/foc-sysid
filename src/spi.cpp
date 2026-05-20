@@ -212,6 +212,53 @@ bool spi_send_position(int32_t counts)
 }
 
 // =============================================================================
+// spi_send_open_loop — command STM to STATE_OPEN_LOOP
+//
+// v_mag:   voltage magnitude in volts (e.g. 1.5f at 12V bus)
+// d_theta: angle increment per SysTick tick (radians)
+//          1Hz electrical at 1kHz SysTick: 2π/1000 = 0.00628f
+//          5Hz electrical:                 2π/200  = 0.03142f
+//
+// Packet layout (32 bytes):
+//   [0]     SPI2_OP_OPEN_LOOP (0x07)
+//   [1-4]   v_mag   float32 little-endian
+//   [5-8]   d_theta float32 little-endian
+//   [9]     CRC8 XOR over bytes [0-8]
+//   [10-31] 0x00
+// =============================================================================
+bool spi_send_open_loop(float v_mag, float d_theta)
+{
+    uint8_t tx[TRANSACTION_BYTES] = {};
+    uint8_t rx[TRANSACTION_BYTES] = {};
+
+    tx[0] = SPI2_OP_OPEN_LOOP;
+    memcpy(&tx[1], &v_mag,   sizeof(float));
+    memcpy(&tx[5], &d_theta, sizeof(float));
+    tx[9] = crc8(tx, 9);
+
+    return spi_transfer_raw(tx, rx, TRANSACTION_BYTES);
+}
+
+// =============================================================================
+// spi_send_stop — command STM to STATE_IDLE from any running state
+//
+// Packet layout (32 bytes):
+//   [0]   SPI2_OP_STOP (0x08)
+//   [1]   CRC8 XOR over byte [0]
+//   [2-31] 0x00
+// =============================================================================
+bool spi_send_stop(void)
+{
+    uint8_t tx[TRANSACTION_BYTES] = {};
+    uint8_t rx[TRANSACTION_BYTES] = {};
+
+    tx[0] = SPI2_OP_STOP;
+    tx[1] = crc8(tx, 1);
+
+    return spi_transfer_raw(tx, rx, TRANSACTION_BYTES);
+}
+
+// =============================================================================
 // spi_ready
 // =============================================================================
 bool spi_ready(void)

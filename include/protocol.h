@@ -12,11 +12,13 @@
 // =============================================================================
 // Opcodes — byte 0 of every SPI transaction
 // =============================================================================
-#define SPI2_OP_NOP        0x00u
-#define SPI2_OP_BLOCK_HDR  0x03u
-#define SPI2_OP_DATA       0x04u
-#define SPI2_OP_READY_ACK  0x05u
-#define SPI2_OP_TELEM_REQ  0x06u
+#define SPI2_OP_NOP        0x00u   // no-op
+#define SPI2_OP_BLOCK_HDR  0x03u   // start trajectory stream → STATE_SERVO_ON
+#define SPI2_OP_DATA       0x04u   // trajectory sample packet
+#define SPI2_OP_READY_ACK  0x05u   // Pi acknowledges READY signal
+#define SPI2_OP_TELEM_REQ  0x06u   // Pi requests telemetry frame
+#define SPI2_OP_OPEN_LOOP  0x07u   // start open-loop spin → STATE_OPEN_LOOP
+#define SPI2_OP_STOP       0x08u   // stop any running state → STATE_IDLE
 
 // =============================================================================
 // Transaction size — both sides must agree
@@ -53,13 +55,14 @@ typedef struct __attribute__((packed)) {
 } TrajSample;
 
 // =============================================================================
-// Drive states
+// Drive states — byte value in TelemetryFrame.drive_state
+// Must match DriveState enum in drive.h
 // =============================================================================
-#define DRIVE_IDLE     0x00u
-#define DRIVE_ALIGN    0x01u
-#define DRIVE_ENABLED  0x02u
-#define DRIVE_FAULT    0x03u
-#define DRIVE_ESTOP    0x04u
+#define DRIVE_IDLE       0x00u
+#define DRIVE_OPEN_LOOP  0x01u
+#define DRIVE_ALIGN      0x02u
+#define DRIVE_SERVO_ON   0x03u
+#define DRIVE_FAULT      0x04u
 
 // =============================================================================
 // Fault flags
@@ -89,4 +92,21 @@ typedef struct __attribute__((packed)) {
 // [2]     uint8_t    sample count low byte
 // [3]     uint8_t    CRC8 XOR over bytes 0-2
 // [4-31]  uint8_t    pad 0x00
+// =============================================================================
+
+// =============================================================================
+// OPEN_LOOP packet layout — 32 bytes total
+// [0]     opcode     SPI2_OP_OPEN_LOOP (0x07)
+// [1-4]   float      v_mag, volts, little-endian
+// [5-8]   float      d_theta, radians per SysTick tick, little-endian
+//                    1Hz electrical at 1kHz SysTick: 2π/1000 = 0.00628f
+// [9]     uint8_t    CRC8 XOR over bytes 0-8
+// [10-31] uint8_t    pad 0x00
+// =============================================================================
+
+// =============================================================================
+// STOP packet layout — 32 bytes total
+// [0]     opcode     SPI2_OP_STOP (0x08)
+// [1]     uint8_t    CRC8 XOR over byte 0
+// [2-31]  uint8_t    pad 0x00
 // =============================================================================
