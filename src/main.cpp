@@ -1,194 +1,72 @@
-#include "config.hpp"
-#include "profile.hpp"
-#include "chirp.hpp"
-#include "spi.hpp"
-#include "protocol.h"
-#include <iostream>
-#include <fstream>
-#include <string>
-#include <unistd.h>
-#include <climits>
-#include <chrono>
-#include <csignal>
 #include <cstdio>
-#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/spi/spidev.h>
 
-static constexpr const char* DOCS_DIR   = "/home/jz/trajectory-streamer/docs";
-static constexpr const char* SCRIPT_DIR = "/home/jz/trajectory-streamer/py-script";
-
-static void sig_handler(int)
+static void print_bytes(const char* label, const uint8_t* data, int len)
 {
-    spi_send_stop();
-    spi_close();
-    exit(0);
+    std::printf("%s", label);
+    for (int i = 0; i < len; i++)
+        std::printf("0x%02X ", data[i]);
+    std::printf("\n");
 }
 
 int main()
 {
-    // ── 1. Init SPI ───────────────────────────────────────────────────────
-    if (!spi_init("/dev/spidev0.0", 1000000)) {
-        std::cerr << "SPI init failed\n";
-        return 1;
+    int fd = open("/dev/spidev0.0", O_RDWR);
+    if (fd < 0) { perror("open /dev/spidev0.0"); return 1; }
+
+    uint8_t  mode  = SPI_MODE_0;
+    uint8_t  bits  = 8;
+    uint32_t speed = 1000000;
+
+    if (ioctl(fd, SPI_IOC_WR_MODE,          &mode)  < 0) { perror("mode");  close(fd); return 1; }
+    if (ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, &bits)  < 0) { perror("bits");  close(fd); return 1; }
+    if (ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ,  &speed) < 0) { perror("speed"); close(fd); return 1; }
+
+    uint8_t tx[32] = {};
+    tx[0] = 0x04;   // SPI2_OP_DATA
+    tx[1] = 0x01;   // pos_cmd = 1 (little-endian)
+    tx[2] = 0x00;
+    tx[3] = 0x00;
+    tx[4] = 0x00;
+    tx[5] = 0x00;   // vel_cmd = 0
+    tx[6] = 0x00;
+    tx[7] = 0x00;
+    tx[8] = 0x00;
+    uint8_t crc = 0;
+    for (int i = 0; i < 9; i++) crc ^= tx[i];
+    tx[9] = crc;
+
+    uint8_t rx[32] = {};
+
+    spi_ioc_transfer tr = {};
+    tr.tx_buf        = reinterpret_cast<unsigned long>(tx);
+    tr.rx_buf        = reinterpret_cast<unsigned long>(rx);
+    tr.len           = 32;
+    tr.speed_hz      = speed;
+    tr.bits_per_word = bits;
+    tr.delay_usecs   = 0;
+    tr.cs_change     = 0;
+
+    std::printf("SPI device: /dev/spidev0.0\n");
+    std::printf("Speed: %u Hz\n\n", speed);
+
+    while (true)
+    {
+        std::memset(rx, 0, sizeof(rx));
+        int ret = ioctl(fd, SPI_IOC_MESSAGE(1), &tr);
+        printf("ioctl ret: %d\n", ret);
+        if (ret < 0) { perror("SPI_IOC_MESSAGE"); break; }
+        print_bytes("sent: ", tx, 32);
+        print_bytes("got:  ", rx, 32);
+        std::printf("press enter to send again\n");
+        getchar();
     }
 
-    // ── 2. Trapezoidal move parameters ───────────────────────────────────
-    int32_t start  = MACHINE.mm_to_counts(0.0);
-    int32_t target = MACHINE.mm_to_counts(22.0);
-    int32_t vel    = MACHINE.mm_to_counts(8.0);
-    int32_t accel  = MACHINE.mm_to_counts(8.0);
-
-    std::signal(SIGINT,  sig_handler);
-    std::signal(SIGTERM, sig_handler);
-
-    while (true) {
-        std::cout << "\nEnter to run move, c=chirp, o=open loop, s=stop, q=quit: ";
-        std::string input;
-        std::getline(std::cin, input);
-
-        if (input == "q") break;
-
-        // ── Open loop — spin motor without feedback ───────────────────────
-        // v_mag:   voltage in volts — keep low at 12V bus (1.0-1.5V)
-        // d_theta: angle per SysTick tick — 1Hz = 2π/1000 = 0.00628f
-        if (input == "o") {
-            float v_mag   = 1.5f;
-            float d_theta = 2.0f * M_PI / 1000.0f;   // 1Hz electrical
-            std::cout << "Open loop: v_mag=" << v_mag
-                      << "V  f_elec=1Hz  d_theta=" << d_theta << "\n";
-            if (!spi_send_open_loop(v_mag, d_theta))
-                std::cerr << "spi_send_open_loop failed\n";
-            continue;
-        }
-
-        // ── Stop — return STM to STATE_IDLE ──────────────────────────────
-        if (input == "s") {
-            std::cout << "Sending stop...\n";
-            if (!spi_send_stop())
-                std::cerr << "spi_send_stop failed\n";
-            continue;
-        }
-
-        bool chirp_mode = (input == "c");
-
-        // ── 3. Precompute profile ─────────────────────────────────────────
-        std::vector<Sample> profile;
-        if (chirp_mode) {
-            profile = compute_chirp(200, 0.1, 250.0, 10.0);
-            std::cout << "Chirp: 0.1→250Hz, ±200 counts, 10s\n";
-        } else {
-            profile = compute_profile(start, target, vel, accel);
-        }
-        std::cout << profile.size() << " samples ("
-                  << profile.size() / 1000.0 << "s)\n";
-
-        // ── 4. Clean previous run output ──────────────────────────────────
-        std::string prof_csv    = chirp_mode ? "/chirp.csv"       : "/profile.csv";
-        std::string telem_f     = chirp_mode ? "/chirp_telem.csv" : "/telem.csv";
-        std::string plot_out    = chirp_mode ? "/bode.png"        : "/profile_plot.png";
-        std::string plot_script = chirp_mode ? "/plotbode.py"     : "/plotprof.py";
-
-        std::remove((std::string(DOCS_DIR) + prof_csv).c_str());
-        std::remove((std::string(DOCS_DIR) + telem_f).c_str());
-        std::remove((std::string(DOCS_DIR) + plot_out).c_str());
-
-        // ── 5. Write profile CSV ──────────────────────────────────────────
-        {
-            std::ofstream csv(std::string(DOCS_DIR) + prof_csv);
-            csv << "sample,t,pos,vel\n";
-            for (size_t i = 0; i < profile.size(); i++)
-                csv << i << "," << i * 0.001 << ","
-                    << profile[i].pos << "," << profile[i].vel << "\n";
-        }
-
-        // ── 6. Open telem CSV ─────────────────────────────────────────────
-        std::ofstream telem_csv(std::string(DOCS_DIR) + telem_f);
-        telem_csv << "t,pos_cmd,pos_fbk,vel_fbk,pos_err,i_q_fbk,v_q_cmd,samples_consumed\n";
-
-        uint32_t telem_t0 = 0;
-        bool     t0_set   = false;
-        int32_t  last_fbk = INT32_MIN;
-
-        // ── 7. Stream initial block ───────────────────────────────────────
-        std::cout << "Streaming...\n";
-        auto t0_stream = std::chrono::steady_clock::now();
-        size_t sent    = spi_stream_block(profile, 0, 4096,
-                                          &telem_csv, &telem_t0, &t0_set, &last_fbk,
-                                          true);
-        auto t1_stream = std::chrono::steady_clock::now();
-        std::cout << "Stream took "
-                  << std::chrono::duration_cast<std::chrono::milliseconds>(
-                         t1_stream - t0_stream).count()
-                  << "ms\n";
-
-        // ── 8. Telem + refill loop ────────────────────────────────────────
-        std::cout << (chirp_mode ? "Running chirp...\n" : "Running...\n");
-        TelemetryFrame frame  = {};
-        auto t_last           = std::chrono::steady_clock::now();
-        auto t_run_start      = std::chrono::steady_clock::now();
-
-        while (frame.samples_consumed < (uint32_t)profile.size()) {
-
-            if (spi_telem_poll(&frame)) {
-                if (!t0_set && frame.samples_consumed > 0) {
-                    telem_t0 = frame.timestamp_ms;
-                    t0_set   = true;
-                }
-                if (t0_set && frame.pos_fbk != last_fbk) {
-                    telem_csv << (frame.timestamp_ms - telem_t0) << ","
-                              << frame.pos_cmd                   << ","
-                              << frame.pos_fbk                   << ","
-                              << frame.vel_fbk                   << ","
-                              << frame.pos_err                   << ","
-                              << frame.i_q_fbk                   << ","
-                              << frame.v_q_cmd                   << ","
-                              << frame.samples_consumed          << "\n";
-                    last_fbk = frame.pos_fbk;
-                }
-            }
-
-            usleep(500);
-
-            if (spi_ready() && sent < profile.size()) {
-                std::cout << "READY triggered — refilling\n";
-                size_t chunk = std::min(profile.size() - sent, (size_t)2048);
-                sent += spi_stream_block(profile, sent, chunk,
-                                         &telem_csv, &telem_t0, &t0_set, &last_fbk,
-                                         false);
-                std::cout << "Refilled — sent " << sent
-                          << "/" << profile.size() << "\n";
-            }
-
-            auto t_now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(
-                    t_now - t_last).count() > 500) {
-                std::cout << "consumed=" << frame.samples_consumed
-                          << "/" << profile.size()
-                          << "  pos_fbk=" << frame.pos_fbk
-                          << "  pos_err=" << frame.pos_err
-                          << "  ts="      << frame.timestamp_ms
-                          << "\n";
-                t_last = t_now;
-            }
-        }
-
-        auto t_run_end = std::chrono::steady_clock::now();
-        std::cout << "Complete in "
-                  << std::chrono::duration_cast<std::chrono::milliseconds>(
-                         t_run_end - t_run_start).count()
-                  << "ms\n";
-
-        telem_csv.close();
-
-        // ── 9. Plot — profile CSV first, telem CSV second ─────────────────
-        std::string plot_cmd = std::string("python3 ") + SCRIPT_DIR + plot_script + " " +
-                               DOCS_DIR + prof_csv + " " +
-                               DOCS_DIR + telem_f;
-
-        int ret = system(plot_cmd.c_str());
-        std::cout << "Plot exit code: " << ret << "\n";
-    }
-
-    spi_send_stop();
-    spi_close();
+    close(fd);
     return 0;
 }
