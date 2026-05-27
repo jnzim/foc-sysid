@@ -50,8 +50,8 @@ typedef struct __attribute__((packed)) {
 // TrajSample — 8 bytes, Pi → STM ring buffer
 // =============================================================================
 typedef struct __attribute__((packed)) {
-    int32_t pos_cmd;  // encoder counts, little-endian
-    int32_t vel_cmd;  // counts/sec, little-endian
+    int16_t pos_cmd;  // encoder counts, little-endian
+    int16_t vel_cmd;  // counts/sec, little-endian
 } TrajSample;
 
 // =============================================================================
