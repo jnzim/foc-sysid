@@ -121,7 +121,7 @@ int main()
         return 1;
     }
 
-    uint8_t  mode  = SPI_MODE_0;
+    uint8_t  mode  = SPI_MODE_1;
     uint8_t  bits  = 8;
     uint32_t speed = 1000000;
 

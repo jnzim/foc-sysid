@@ -22,8 +22,9 @@ static constexpr size_t TRANSACTION_BYTES = SPI2_TRANSACTION_BYTES;
 static constexpr int READY_GPIO_PIN = 7;    // STM READY, active-low
 static constexpr int CS_GPIO_PIN    = 25;   // manual CS / STM NSS
 
-static constexpr int CS_SETUP_US = 50;
-static constexpr int CS_GAP_US   = 10;
+
+
+
 
 static constexpr size_t INITIAL_FILL_FRAMES = 4096;
 static constexpr size_t REFILL_FRAMES       = 2048;
