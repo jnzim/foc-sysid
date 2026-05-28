@@ -4,27 +4,22 @@
 #include "spi.hpp"
 #include "protocol.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <fcntl.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
+#include <fstream>
+#include <iostream>
 #include <linux/spi/spidev.h>
 #include <lgpio.h>
-
-#include <iostream>
-#include <algorithm>
-#include <fstream>
+#include <sys/ioctl.h>
+#include <unistd.h>
 #include <vector>
-#include <cstdint>
 
 static constexpr size_t TRANSACTION_BYTES = SPI2_TRANSACTION_BYTES;
 
 static constexpr int READY_GPIO_PIN = 7;    // STM READY, active-low
 static constexpr int CS_GPIO_PIN    = 25;   // manual CS / STM NSS
-
-
-
-
 
 static constexpr size_t INITIAL_FILL_FRAMES = 4096;
 static constexpr size_t REFILL_FRAMES       = 2048;
@@ -37,9 +32,11 @@ static uint32_t spi_speed_hz_cached = 1000000;
 static uint8_t crc8(const uint8_t* data, size_t len)
 {
     uint8_t crc = 0x00;
+
     for (size_t i = 0; i < len; i++) {
         crc ^= data[i];
     }
+
     return crc;
 }
 
@@ -49,6 +46,11 @@ static uint8_t crc8(const uint8_t* data, size_t len)
 bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len)
 {
     if (spi_fd < 0 || gpio_h < 0) {
+        return false;
+    }
+
+    if (tx == nullptr || rx == nullptr) {
+        std::cerr << "spi_transfer_raw: null buffer\n";
         return false;
     }
 
@@ -63,13 +65,13 @@ bool spi_transfer_raw(const uint8_t* tx, uint8_t* rx, size_t len)
     struct spi_ioc_transfer tr = {};
     tr.tx_buf        = reinterpret_cast<unsigned long>(tx);
     tr.rx_buf        = reinterpret_cast<unsigned long>(rx);
-    tr.len           = len;
+    tr.len           = static_cast<__u32>(len);
     tr.speed_hz      = spi_speed_hz_cached;
     tr.bits_per_word = 8;
     tr.cs_change     = 0;
     tr.delay_usecs   = 0;
 
-    bool ok = ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr) >= 0;
+    const bool ok = ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr) >= 0;
 
     lgGpioWrite(gpio_h, CS_GPIO_PIN, 1);
     usleep(CS_GAP_US);
@@ -111,7 +113,9 @@ bool spi_init(const char* device, uint32_t speed_hz)
         return false;
     }
 
-    uint8_t  mode  = SPI_MODE_0 | SPI_NO_CS;
+    // STM SPI2 is configured CPOL=0, CPHA=1, so Pi must be SPI_MODE_1.
+    // SPI_NO_CS because CS is manually controlled on GPIO25.
+    uint8_t  mode  = SPI_MODE_1 | SPI_NO_CS;
     uint8_t  bits  = 8;
     uint32_t speed = speed_hz;
 
@@ -136,7 +140,9 @@ bool spi_init(const char* device, uint32_t speed_hz)
 // =============================================================================
 // write_telem_row
 // =============================================================================
-static void write_telem_row(std::ofstream& csv, const TelemetryFrame& f, uint32_t t0)
+static void write_telem_row(std::ofstream& csv,
+                            const TelemetryFrame& f,
+                            uint32_t t0)
 {
     csv << (f.timestamp_ms - t0) << ","
         << f.pos_cmd             << ","
@@ -169,6 +175,8 @@ bool spi_send_block_header(void)
     uint8_t rx[TRANSACTION_BYTES] = {};
 
     tx[0] = SPI2_OP_BLOCK_HDR;
+
+    // Current STM ignores count payload, but keep bytes defined and CRC valid.
     tx[1] = 0;
     tx[2] = 0;
     tx[3] = crc8(tx, 3);
@@ -201,7 +209,7 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
         return 0;
     }
 
-    size_t end = std::min(offset + count, profile.size());
+    const size_t end = std::min(offset + count, profile.size());
     size_t sent = 0;
 
     for (size_t i = offset; i < end; i++) {
@@ -210,19 +218,12 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
         uint8_t tx[TRANSACTION_BYTES] = {};
         uint8_t rx[TRANSACTION_BYTES] = {};
 
-        /*
-         * DATA packet, 32-bit:
-         * [0]   opcode
-         * [1-4] int32 pos_cmd
-         * [5-8] int32 vel_cmd
-         * [9]   CRC over bytes 0-8
-         */
         int32_t pos = static_cast<int32_t>(s.pos);
         int32_t vel = static_cast<int32_t>(s.vel);
 
         tx[0] = SPI2_OP_DATA;
-        memcpy(&tx[1], &pos, sizeof(int32_t));
-        memcpy(&tx[5], &vel, sizeof(int32_t));
+        std::memcpy(&tx[1], &pos, sizeof(int32_t));
+        std::memcpy(&tx[5], &vel, sizeof(int32_t));
         tx[9] = crc8(tx, 9);
 
         if (!spi_transfer_raw(tx, rx, TRANSACTION_BYTES)) {
@@ -232,9 +233,11 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
 
         sent++;
 
+        // MISO telemetry is currently disabled on STM.
+        // Keep CSV handling guarded; it will become useful again when TX is restored.
         if (csv && telem_t0 && t0_set && last_fbk) {
             TelemetryFrame f;
-            memcpy(&f, rx, sizeof(TelemetryFrame));
+            std::memcpy(&f, rx, sizeof(TelemetryFrame));
 
             if (!(*t0_set) && f.samples_consumed > 0) {
                 *telem_t0 = f.timestamp_ms;
@@ -257,7 +260,7 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
 }
 
 // =============================================================================
-// spi_stream_profile — full producer/consumer model with A2 handshake
+// spi_stream_profile — full producer/consumer model with READY handshake
 // =============================================================================
 size_t spi_stream_profile(const std::vector<Sample>& profile,
                           std::ofstream* csv,
@@ -277,19 +280,18 @@ size_t spi_stream_profile(const std::vector<Sample>& profile,
                              true);
 
     while (sent < profile.size()) {
-        // Wait for STM to assert READY (active-low)
         while (!spi_ready()) {
             usleep(50);
         }
 
-        size_t n = spi_stream_block(profile,
-                                    sent,
-                                    REFILL_FRAMES,
-                                    csv,
-                                    telem_t0,
-                                    t0_set,
-                                    last_fbk,
-                                    false);
+        const size_t n = spi_stream_block(profile,
+                                          sent,
+                                          REFILL_FRAMES,
+                                          csv,
+                                          telem_t0,
+                                          t0_set,
+                                          last_fbk,
+                                          false);
 
         if (n == 0) {
             break;
@@ -297,7 +299,6 @@ size_t spi_stream_profile(const std::vector<Sample>& profile,
 
         sent += n;
 
-        // A2: wait for STM to deassert READY before looking for next edge
         while (spi_ready()) {
             usleep(50);
         }
@@ -311,7 +312,7 @@ size_t spi_stream_profile(const std::vector<Sample>& profile,
 // =============================================================================
 bool spi_telem_poll(TelemetryFrame* frame)
 {
-    if (!frame) {
+    if (frame == nullptr) {
         return false;
     }
 
@@ -325,7 +326,7 @@ bool spi_telem_poll(TelemetryFrame* frame)
         return false;
     }
 
-    memcpy(frame, rx, sizeof(TelemetryFrame));
+    std::memcpy(frame, rx, sizeof(TelemetryFrame));
     return true;
 }
 
@@ -341,8 +342,8 @@ bool spi_send_position(int32_t counts)
     int32_t vel = 0;
 
     tx[0] = SPI2_OP_DATA;
-    memcpy(&tx[1], &pos, sizeof(int32_t));
-    memcpy(&tx[5], &vel, sizeof(int32_t));
+    std::memcpy(&tx[1], &pos, sizeof(int32_t));
+    std::memcpy(&tx[5], &vel, sizeof(int32_t));
     tx[9] = crc8(tx, 9);
 
     return spi_transfer_raw(tx, rx, TRANSACTION_BYTES);
@@ -357,8 +358,8 @@ bool spi_send_open_loop(float v_mag, float d_theta)
     uint8_t rx[TRANSACTION_BYTES] = {};
 
     tx[0] = SPI2_OP_OPEN_LOOP;
-    memcpy(&tx[1], &v_mag,   sizeof(float));
-    memcpy(&tx[5], &d_theta, sizeof(float));
+    std::memcpy(&tx[1], &v_mag,   sizeof(float));
+    std::memcpy(&tx[5], &d_theta, sizeof(float));
     tx[9] = crc8(tx, 9);
 
     return spi_transfer_raw(tx, rx, TRANSACTION_BYTES);
