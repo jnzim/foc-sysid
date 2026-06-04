@@ -103,9 +103,15 @@ static bool send_samples(int gpio_h,
             return false;
         }
 
-        if (i < 5 || (i % 200) == 0) {
-            std::printf("TX[%5zu]: pos=%d vel=%d crc=%02X\n",
-                        i, pos, vel, tx[9]);
+        if (i < 5 || (i % 200) == 0) 
+        {
+            TelemetryFrame* t = reinterpret_cast<TelemetryFrame*>(rx);
+            std::printf("TX[%5zu]: pos=%d vel=%d | telem: state=%u ts=%u consumed=%u pos=%d\n",
+            i, pos, vel,
+            t->drive_state,
+            t->timestamp_ms,
+            t->samples_consumed,
+            t->pos_cmd);
         }
     }
 
@@ -203,6 +209,8 @@ int main()
             continue;
         }
 
+
+        
         std::printf("done. sent=%d\n", total_samples);
         std::printf("check STM: cnt_error=0, cnt_data=%d, samples_consumed=%d, last_pos_cmd=100000, last_vel_cmd=0\n",
                     total_samples,
