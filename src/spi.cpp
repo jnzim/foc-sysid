@@ -27,7 +27,8 @@ static constexpr size_t REFILL_FRAMES       = 2048;
 static int spi_fd = -1;
 static int gpio_h = -1;
 
-static uint32_t spi_speed_hz_cached = 1000000;
+static uint32_t     spi_speed_hz_cached = 1000000;
+
 
 static uint8_t crc8(const uint8_t* data, size_t len)
 {

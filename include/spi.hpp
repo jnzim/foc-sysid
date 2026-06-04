@@ -41,3 +41,4 @@ bool spi_ready(void);
 
 // close the spidev file descriptor
 void spi_close();
+
