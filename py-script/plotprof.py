@@ -1,75 +1,60 @@
-import csv
+#!/usr/bin/env python3
 import sys
-import matplotlib
-matplotlib.use('Agg')
+import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 
-profile_file = sys.argv[1] if len(sys.argv) > 1 else "/home/jz/trajectory-streamer/docs/profile.csv"
-telem_file   = sys.argv[2] if len(sys.argv) > 2 else "/home/jz/trajectory-streamer/docs/telem.csv"
+if len(sys.argv) < 2:
+    print("usage: python3 plotrun.py run_000.csv")
+    sys.exit(1)
 
-def load_csv(path, cols):
-    rows = []
-    with open(path) as f:
-        for row in csv.DictReader(f):
-            rows.append({c: float(row[c]) for c in cols})
-    return rows
+df = pd.read_csv(sys.argv[1],
+    names=['t','pos_cmd','pos_fbk','vel_cmd','vel_fbk',
+           'pos_err','i_q_fbk','consumed'],
+    header=0)
+df = df.drop_duplicates(subset='consumed', keep='last')
 
-profile = load_csv(profile_file, ['sample', 't', 'pos', 'vel'])
-telem   = load_csv(telem_file,   ['t', 'pos_cmd', 'pos_fbk', 'vel_fbk',
-                                   'pos_err', 'i_q_fbk', 'v_q_cmd', 'samples_consumed'])
+fig = plt.figure(figsize=(14, 10))
+fig.suptitle(sys.argv[1], fontsize=11)
+gs = gridspec.GridSpec(3, 1, hspace=0.45)
 
-# ── Telem on STM time base (timestamp_ms - t0, converted to seconds) ─────────
-telem_t       = [s['t'] / 1000.0 for s in telem]
-telem_pos_cmd = [s['pos_cmd']    for s in telem]
-telem_pos_fbk = [s['pos_fbk']   for s in telem]
-telem_vel_fbk = [s['vel_fbk']   for s in telem]
-telem_pos_err = [s['pos_err']   for s in telem]
-telem_i_q_fbk = [s['i_q_fbk'] / 1000.0 for s in telem]   # mA → A
-telem_v_q_cmd = [s['v_q_cmd']   for s in telem]
+# --- Position + Error (dual y-axis) ---
+ax0 = fig.add_subplot(gs[0])
+ax0.plot(df.t, df.pos_cmd, label='pos_cmd', linewidth=1)
+ax0.plot(df.t, df.pos_fbk, label='pos_fbk', linewidth=1)
+ax0.set_ylabel('counts')
+ax0.set_title('Position')
+ax0.grid(True, alpha=0.3)
 
-# ── Profile normalized to telem time base — shape reference only ──────────────
-profile_t_raw = [s['t'] for s in profile]
-profile_pos   = [s['pos'] for s in profile]
-profile_vel   = [s['vel'] for s in profile]
+ax0r = ax0.twinx()
+ax0r.plot(df.t, df.pos_err, color='orange', linewidth=0.8,
+          linestyle='--', label='pos_err (right)')
+ax0r.set_ylabel('error (counts)', color='orange')
+ax0r.tick_params(axis='y', labelcolor='orange')
 
-if telem_t and profile_t_raw[-1] > 0:
-    scale = (telem_t[-1] - telem_t[0]) / profile_t_raw[-1]
-    profile_t = [telem_t[0] + t * scale for t in profile_t_raw]
-else:
-    profile_t = profile_t_raw
+lines0, labels0 = ax0.get_legend_handles_labels()
+lines0r, labels0r = ax0r.get_legend_handles_labels()
+ax0.legend(lines0 + lines0r, labels0 + labels0r, fontsize=8)
 
-fig, axes = plt.subplots(4, 1, figsize=(12, 14), sharex=True)
-ax1, ax2, ax3, ax4 = axes
+# --- Velocity ---
+ax1 = fig.add_subplot(gs[1], sharex=ax0)
+ax1.plot(df.t, df.vel_cmd, label='vel_cmd', linewidth=1)
+ax1.plot(df.t, df.vel_fbk, label='vel_fbk', linewidth=1)
+ax1.set_ylabel('counts/s')
+ax1.set_title('Velocity')
+ax1.legend(fontsize=8)
+ax1.grid(True, alpha=0.3)
 
-# ── Position ──────────────────────────────────────────────────────────────────
-ax1.plot(profile_t, profile_pos,   color='steelblue', label='profile cmd (shape)',  linewidth=2, alpha=0.5)
-ax1.plot(telem_t,   telem_pos_cmd, color='tomato',    label='telem cmd (STM ticks)', linewidth=1, linestyle='--', alpha=0.9)
-ax1.plot(telem_t,   telem_pos_fbk, color='green',     label='plant pos fbk',         linewidth=1, alpha=0.9)
-ax1.set_ylabel('position (counts)')
-ax1.set_title('trajectory vs telem — STM time base')
-ax1.legend()
+# --- Current ---
+ax2 = fig.add_subplot(gs[2], sharex=ax0)
+ax2.plot(df.t, df.i_q_fbk, color='red', linewidth=1, label='i_q_fbk')
+ax2.set_ylabel('mA')
+ax2.set_xlabel('ms')
+ax2.set_title('Q-axis Current')
+ax2.legend(fontsize=8)
+ax2.grid(True, alpha=0.3)
 
-# ── Velocity ──────────────────────────────────────────────────────────────────
-ax2.plot(profile_t, profile_vel,   color='steelblue', label='profile vel (shape)',  linewidth=2, alpha=0.5)
-ax2.plot(telem_t,   telem_vel_fbk, color='green',     label='plant vel fbk',         linewidth=1, alpha=0.9)
-ax2.set_ylabel('velocity (counts/s)')
-ax2.legend()
-
-# ── Position error + current ──────────────────────────────────────────────────
-ax3.plot(telem_t, telem_pos_err, color='orange', label='pos_err (counts)', linewidth=1)
-ax3.set_ylabel('pos error (counts)')
-ax3.legend(loc='upper left')
-ax3b = ax3.twinx()
-ax3b.plot(telem_t, telem_i_q_fbk, color='purple', label='i_q_fbk (A)', linewidth=1, alpha=0.7)
-ax3b.set_ylabel('i_q (A)')
-ax3b.legend(loc='upper right')
-
-# ── v_q_cmd ───────────────────────────────────────────────────────────────────
-ax4.plot(telem_t, telem_v_q_cmd, color='red', label='v_q_cmd (V)', linewidth=1)
-ax4.set_ylabel('v_q (V)')
-ax4.set_xlabel('time (s) — STM tick_ms')
-ax4.legend()
-
-fig.tight_layout()
-plt.savefig('/home/jz/trajectory-streamer/docs/profile_plot.png', dpi=150)
-print("Done — profile_plot.png")
+out = sys.argv[1].replace('.csv', '.png')
+plt.savefig(out, dpi=150, bbox_inches='tight')
+print(f"saved {out}")
+plt.show()

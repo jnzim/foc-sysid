@@ -2,12 +2,14 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <cstdlib>
 
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <linux/spi/spidev.h>
 #include <lgpio.h>
+#include <fstream>
 
 #include "protocol.h"
 #include "profile.hpp"
@@ -61,8 +63,15 @@ static bool send_block_header(int gpio_h,
                               uint32_t speed,
                               int total_samples)
 {
-    std::memset(tx, 0, SPI2_TRANSACTION_BYTES);
-    std::memset(rx, 0, SPI2_TRANSACTION_BYTES);
+    // flush stale telem from previous run
+    for (int i = 0; i < 10; i++)
+    {
+        std::memset(tx, 0, SPI2_TRANSACTION_BYTES);
+        std::memset(rx, 0, SPI2_TRANSACTION_BYTES);
+        tx[0] = SPI2_OP_NOP;
+        spi_transfer(gpio_h, fd, tx, rx, speed);
+        usleep(CS_GAP_US);
+    }
 
     tx[0] = SPI2_OP_BLOCK_HDR;
     tx[1] = static_cast<uint8_t>(total_samples & 0xFF);
@@ -77,13 +86,19 @@ static bool send_block_header(int gpio_h,
     return true;
 }
 
+
+bool collecting = false;
 static bool send_samples(int gpio_h,
                          int fd,
                          uint8_t* tx,
                          uint8_t* rx,
                          uint32_t speed,
-                         const std::vector<Sample>& profile)
+                         const std::vector<Sample>& profile,
+                         std::vector<TelemetryFrame>& telem)
 {
+    telem.clear();
+    telem.reserve(profile.size());
+
     for (size_t i = 0; i < profile.size(); i++) {
         const Sample& s = profile[i];
 
@@ -98,20 +113,28 @@ static bool send_samples(int gpio_h,
         std::memcpy(&tx[5], &vel, sizeof(int32_t));
         tx[9] = crc8(tx, 9);
 
-        if (!spi_transfer(gpio_h, fd, tx, rx, speed)) {
+        if (!spi_transfer(gpio_h, fd, tx, rx, speed))
+        {
             std::fprintf(stderr, "spi_transfer DATA failed at sample %zu\n", i);
             return false;
         }
 
-        if (i < 5 || (i % 200) == 0) 
+        TelemetryFrame f;
+        std::memcpy(&f, rx, sizeof(TelemetryFrame));
+
+        if (f.samples_consumed == 1) collecting = true;
+
+        if (collecting &&
+            (telem.empty() || f.samples_consumed > telem.back().samples_consumed))
         {
-            TelemetryFrame* t = reinterpret_cast<TelemetryFrame*>(rx);
+            telem.push_back(f);
+        }
+
+        if (i < 5 || (i % 200) == 0)
+        {
             std::printf("TX[%5zu]: pos=%d vel=%d | telem: state=%u ts=%u consumed=%u pos=%d\n",
-            i, pos, vel,
-            t->drive_state,
-            t->timestamp_ms,
-            t->samples_consumed,
-            t->pos_cmd);
+                i, pos, vel,
+                f.drive_state, f.timestamp_ms, f.samples_consumed, f.pos_cmd);
         }
     }
 
@@ -125,6 +148,8 @@ int main()
     const int32_t VEL_CNT    = 200000;
     const int32_t ACCEL_CNT  = 100000;
     const double  DT         = 0.001;
+
+    std::system("rm -f ../docs/run_*.csv ../docs/run_*.png");
 
     std::vector<Sample> profile =
         compute_profile(START_CNT, TARGET_CNT, VEL_CNT, ACCEL_CNT, DT);
@@ -175,8 +200,7 @@ int main()
         close(fd);
         lgGpiochipClose(gpio_h);
         return 1;
-    }   
-
+    }
 
     if (ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0) {
         perror("SPI_IOC_WR_BITS_PER_WORD");
@@ -195,7 +219,11 @@ int main()
     uint8_t tx[SPI2_TRANSACTION_BYTES] = {};
     uint8_t rx[SPI2_TRANSACTION_BYTES] = {};
 
-    while (true) {
+    std::vector<TelemetryFrame> telem;
+    uint32_t run = 0;
+
+    while (true)
+    {
         std::printf("press enter to stream profile\n");
         getchar();
 
@@ -205,16 +233,61 @@ int main()
 
         usleep(200);
 
-        if (!send_samples(gpio_h, fd, tx, rx, speed, profile)) {
+        if (!send_samples(gpio_h, fd, tx, rx, speed, profile, telem))
+        {
             continue;
         }
 
-
+        while (!telem.empty() && telem.back().samples_consumed < (uint32_t)total_samples)
+        {
+            std::memset(tx, 0, SPI2_TRANSACTION_BYTES);
+            std::memset(rx, 0, SPI2_TRANSACTION_BYTES);
         
+            int32_t pos = TARGET_CNT;
+            int32_t vel = 0;
+        
+            tx[0] = SPI2_OP_DATA;
+            std::memcpy(&tx[1], &pos, sizeof(int32_t));
+            std::memcpy(&tx[5], &vel, sizeof(int32_t));
+            tx[9] = crc8(tx, 9);
+        
+            spi_transfer(gpio_h, fd, tx, rx, speed);
+        
+            TelemetryFrame f;
+            std::memcpy(&f, rx, sizeof(TelemetryFrame));
+            if (f.samples_consumed > 0 &&
+                (telem.empty() || f.timestamp_ms != telem.back().timestamp_ms))
+            {
+                telem.push_back(f);
+            }
+        }
+
+
         std::printf("done. sent=%d\n", total_samples);
-        std::printf("check STM: cnt_error=0, cnt_data=%d, samples_consumed=%d, last_pos_cmd=100000, last_vel_cmd=0\n",
-                    total_samples,
-                    total_samples);
+
+        // write CSV after stream completes — no timing impact
+        char fname[64];
+        std::snprintf(fname, sizeof(fname), "../docs/run_%03u.csv", run++);
+        std::ofstream csv(fname);
+        csv << "t,pos_cmd,pos_fbk,vel_cmd,vel_fbk,pos_err,i_q_fbk,consumed\n";
+        uint32_t t0 = telem.empty() ? 0 : telem.front().timestamp_ms;
+
+        for (const auto& f : telem)
+        {
+            csv << (f.timestamp_ms - t0) << ","
+                << f.pos_cmd             << ","
+                << f.pos_fbk             << ","
+                << f.vel_cmd             << ","
+                << f.vel_fbk             << ","
+                << f.pos_err             << ","
+                << f.i_q_fbk             << ","
+                << f.samples_consumed    << "\n";
+        }
+        std::printf("wrote %s\n", fname);
+
+        char cmd[128];
+        std::snprintf(cmd, sizeof(cmd), "python3 ../py-script/plotprof.py %s", fname);
+        std::system(cmd);
     }
 
     lgGpioWrite(gpio_h, CS_GPIO, 1);
