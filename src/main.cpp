@@ -264,22 +264,22 @@ int main()
 
 
         std::printf("done. sent=%d\n", total_samples);
-
-        // write CSV after stream completes — no timing impact
         char fname[64];
         std::snprintf(fname, sizeof(fname), "../docs/run_%03u.csv", run++);
         std::ofstream csv(fname);
-        csv << "t,pos_cmd,pos_fbk,vel_cmd,vel_fbk,pos_err,i_q_fbk,consumed\n";
+        csv << "t,pos_cmd,pos_fbk,vel_cmd,vel_fbk,pos_err,iq_cmd,i_q_fbk,consumed\n";
         uint32_t t0 = telem.empty() ? 0 : telem.front().timestamp_ms;
-
         for (const auto& f : telem)
         {
+            int32_t pos_err = f.pos_cmd - f.pos_fbk;
+            int32_t vel_err = f.vel_cmd - f.vel_fbk;
             csv << (f.timestamp_ms - t0) << ","
                 << f.pos_cmd             << ","
                 << f.pos_fbk             << ","
                 << f.vel_cmd             << ","
                 << f.vel_fbk             << ","
-                << f.iq_cmd             << ","
+                << pos_err               << ","
+                << f.iq_cmd              << ","
                 << f.i_q_fbk             << ","
                 << f.samples_consumed    << "\n";
         }
