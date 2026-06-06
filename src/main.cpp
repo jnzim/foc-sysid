@@ -20,17 +20,6 @@
 #define CS_SETUP_US 50
 #define CS_GAP_US   200
 
-static uint8_t crc8(const uint8_t* buf, int len)
-{
-    uint8_t crc = 0;
-
-    for (int i = 0; i < len; i++) {
-        crc ^= buf[i];
-    }
-
-    return crc;
-}
-
 static bool spi_transfer(int gpio_h,
                          int fd,
                          uint8_t* tx,
@@ -63,7 +52,7 @@ static bool send_block_header(int gpio_h,
                               uint32_t speed,
                               int total_samples)
 {
-    // flush stale telem from previous run
+    /* Flush stale telem */
     for (int i = 0; i < 10; i++)
     {
         std::memset(tx, 0, SPI2_TRANSACTION_BYTES);
@@ -73,10 +62,20 @@ static bool send_block_header(int gpio_h,
         usleep(CS_GAP_US);
     }
 
+    /* Build and send BLOCK_HDR packet */
+    std::memset(tx, 0, SPI2_TRANSACTION_BYTES);
+    std::memset(rx, 0, SPI2_TRANSACTION_BYTES);
+
     tx[0] = SPI2_OP_BLOCK_HDR;
     tx[1] = static_cast<uint8_t>(total_samples & 0xFF);
     tx[2] = static_cast<uint8_t>((total_samples >> 8) & 0xFF);
-    tx[3] = crc8(tx, 3);
+    
+    /* Calculate CRC-16 over bytes 0..13 */
+    uint16_t crc = crc16_calc(tx, 14);
+    tx[14] = static_cast<uint8_t>(crc & 0xFF);
+    tx[15] = static_cast<uint8_t>((crc >> 8) & 0xFF);
+
+    std::printf("BLOCK_HDR: samples=%d crc16=%04x\n", total_samples, crc);
 
     if (!spi_transfer(gpio_h, fd, tx, rx, speed)) {
         perror("spi_transfer BLOCK_HDR");
@@ -86,8 +85,8 @@ static bool send_block_header(int gpio_h,
     return true;
 }
 
-
 bool collecting = false;
+
 static bool send_samples(int gpio_h,
                          int fd,
                          uint8_t* tx,
@@ -99,19 +98,24 @@ static bool send_samples(int gpio_h,
     telem.clear();
     telem.reserve(profile.size());
 
-    for (size_t i = 0; i < profile.size(); i++) {
+    for (size_t i = 0; i < profile.size(); i++)
+    {
         const Sample& s = profile[i];
 
         std::memset(tx, 0, SPI2_TRANSACTION_BYTES);
         std::memset(rx, 0, SPI2_TRANSACTION_BYTES);
 
-        int32_t pos = static_cast<int32_t>(s.pos);
-        int32_t vel = static_cast<int32_t>(s.vel);
+        /* Build TrajSlot with CRC-16 */
+        TrajSlot slot;
+        slot.opcode  = SPI2_OP_DATA;
+        slot.seq     = static_cast<uint8_t>(i & 0xFF);
+        slot.pos_cmd = static_cast<int32_t>(s.pos);
+        slot.vel_cmd = static_cast<int32_t>(s.vel);
+        slot.reserved = 0;
+        slot.crc16 = crc16_calc((uint8_t*)&slot, TRAJ_CRC_LEN);
 
-        tx[0] = SPI2_OP_DATA;
-        std::memcpy(&tx[1], &pos, sizeof(int32_t));
-        std::memcpy(&tx[5], &vel, sizeof(int32_t));
-        tx[9] = crc8(tx, 9);
+        /* Copy to tx buffer */
+        std::memcpy(tx, &slot, sizeof(TrajSlot));
 
         if (!spi_transfer(gpio_h, fd, tx, rx, speed))
         {
@@ -132,9 +136,8 @@ static bool send_samples(int gpio_h,
 
         if (i < 5 || (i % 200) == 0)
         {
-            std::printf("TX[%5zu]: pos=%d vel=%d | telem: state=%u ts=%u consumed=%u pos=%d\n",
-                i, pos, vel,
-                f.drive_state, f.timestamp_ms, f.samples_consumed, f.pos_cmd);
+            std::printf("TX[%5zu]: pos=%d vel=%d | telem: state=%u consumed=%u\n",
+                i, slot.pos_cmd, slot.vel_cmd, f.drive_state, f.samples_consumed);
         }
     }
 
@@ -238,30 +241,35 @@ int main()
             continue;
         }
 
-        while (!telem.empty() && telem.back().samples_consumed < (uint32_t)total_samples)
+        /* Drain loop: keep sending final position until STM finishes */
         {
-            std::memset(tx, 0, SPI2_TRANSACTION_BYTES);
-            std::memset(rx, 0, SPI2_TRANSACTION_BYTES);
-        
-            int32_t pos = TARGET_CNT;
-            int32_t vel = 0;
-        
-            tx[0] = SPI2_OP_DATA;
-            std::memcpy(&tx[1], &pos, sizeof(int32_t));
-            std::memcpy(&tx[5], &vel, sizeof(int32_t));
-            tx[9] = crc8(tx, 9);
-        
-            spi_transfer(gpio_h, fd, tx, rx, speed);
-        
-            TelemetryFrame f;
-            std::memcpy(&f, rx, sizeof(TelemetryFrame));
-            if (f.samples_consumed > 0 &&
-                (telem.empty() || f.timestamp_ms != telem.back().timestamp_ms))
+            uint8_t drain_seq = 0;
+            while (!telem.empty() && telem.back().samples_consumed < (uint32_t)total_samples)
             {
-                telem.push_back(f);
+                std::memset(tx, 0, SPI2_TRANSACTION_BYTES);
+                std::memset(rx, 0, SPI2_TRANSACTION_BYTES);
+
+                /* Build TrajSlot with final position */
+                TrajSlot slot;
+                slot.opcode  = SPI2_OP_DATA;
+                slot.seq     = drain_seq++;
+                slot.pos_cmd = TARGET_CNT;
+                slot.vel_cmd = 0;
+                slot.reserved = 0;
+                slot.crc16 = crc16_calc((uint8_t*)&slot, TRAJ_CRC_LEN);
+
+                std::memcpy(tx, &slot, sizeof(TrajSlot));
+                spi_transfer(gpio_h, fd, tx, rx, speed);
+
+                TelemetryFrame f;
+                std::memcpy(&f, rx, sizeof(TelemetryFrame));
+                if (f.samples_consumed > 0 &&
+                    (telem.empty() || f.timestamp_ms != telem.back().timestamp_ms))
+                {
+                    telem.push_back(f);
+                }
             }
         }
-
 
         std::printf("done. sent=%d\n", total_samples);
         char fname[64];

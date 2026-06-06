@@ -79,8 +79,12 @@ std::vector<Sample> compute_profile(int32_t start_cnt,
         vel_filt = vel_filt + alpha * (v - vel_filt);
         
         Sample s;
+       // s.pos = static_cast<int32_t>(std::round(pos));
+       // s.vel = static_cast<int32_t>(std::round(vel_filt));
+
+     
         s.pos = static_cast<int32_t>(std::round(pos));
-        s.vel = static_cast<int32_t>(std::round(vel_filt));
+        s.vel = static_cast<int32_t>(std::round(v));
         profile.push_back(s);
     }
     
