@@ -24,17 +24,17 @@
 // STM → Pi status frame.
 // =============================================================================
 typedef struct __attribute__((packed)) {
-    int32_t  pos_cmd;           //  4   last command STM consumed
-    int32_t  pos_fbk;           //  4   actual encoder position
-    int32_t  vel_cmd;           //  4   last vel command
-    int32_t  vel_fbk;           //  4   actual velocity
-    uint32_t timestamp_ms;      //  4
-    uint8_t  drive_state;       //  1
-    uint8_t  fault_flags;       //  1
-    uint32_t samples_consumed;  //  4
-    int16_t  pos_err;           //  2
-    int16_t  i_q_fbk;           //  2
-    int16_t  v_q_cmd;           //  2   q-axis voltage command
+int32_t  pos_cmd;           //  4
+int32_t  pos_fbk;           //  4
+int32_t  vel_cmd;           //  4
+int32_t  vel_fbk;           //  4
+uint32_t timestamp_ms;      //  4
+uint8_t  drive_state;       //  1
+uint8_t  fault_flags;       //  1
+uint32_t samples_consumed;  //  4
+int16_t  iq_cmd;            //  2   velocity loop command (mA)
+int16_t  i_q_fbk;           //  2
+int16_t  v_q_cmd;           //  2
 } TelemetryFrame;               // 32 bytes total
 
 // =============================================================================

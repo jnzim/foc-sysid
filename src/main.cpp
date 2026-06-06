@@ -146,7 +146,7 @@ int main()
     const int32_t START_CNT  = 0;
     const int32_t TARGET_CNT = 100000;
     const int32_t VEL_CNT    = 200000;
-    const int32_t ACCEL_CNT  = 100000;
+    const int32_t ACCEL_CNT  = 500000;
     const double  DT         = 0.001;
 
     std::system("rm -f ../docs/run_*.csv ../docs/run_*.png");
@@ -279,7 +279,7 @@ int main()
                 << f.pos_fbk             << ","
                 << f.vel_cmd             << ","
                 << f.vel_fbk             << ","
-                << f.pos_err             << ","
+                << f.iq_cmd             << ","
                 << f.i_q_fbk             << ","
                 << f.samples_consumed    << "\n";
         }

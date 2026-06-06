@@ -150,7 +150,7 @@ static void write_telem_row(std::ofstream& csv,
         << f.pos_fbk             << ","
         << f.vel_cmd             << ","
         << f.vel_fbk             << ","
-        << f.pos_err             << ","
+        << f.iq_cmd             << ","
         << f.i_q_fbk             << ","
         << f.samples_consumed    << "\n";
 }
@@ -197,7 +197,8 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
                         int32_t* last_fbk,
                         bool send_header)
 {
-    if (send_header) {
+    if (send_header) 
+    {
         if (!spi_send_block_header()) {
             std::cerr << "spi: BLOCK_HDR failed\n";
             return 0;
@@ -206,7 +207,8 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
         usleep(200);
     }
 
-    if (offset >= profile.size()) {
+    if (offset >= profile.size()) 
+    {
         return 0;
     }
 
@@ -227,7 +229,8 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
         std::memcpy(&tx[5], &vel, sizeof(int32_t));
         tx[9] = crc8(tx, 9);
 
-        if (!spi_transfer_raw(tx, rx, TRANSACTION_BYTES)) {
+        if (!spi_transfer_raw(tx, rx, TRANSACTION_BYTES)) 
+        {
             std::cerr << "spi: DATA failed at sample " << i << "\n";
             return sent;
         }
@@ -236,16 +239,19 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
 
         // MISO telemetry is currently disabled on STM.
         // Keep CSV handling guarded; it will become useful again when TX is restored.
-        if (csv && telem_t0 && t0_set && last_fbk) {
+        if (csv && telem_t0 && t0_set && last_fbk) 
+        {
             TelemetryFrame f;
             std::memcpy(&f, rx, sizeof(TelemetryFrame));
 
-            if (!(*t0_set) && f.samples_consumed > 0) {
+            if (!(*t0_set) && f.samples_consumed > 0) 
+            {
                 *telem_t0 = f.timestamp_ms;
                 *t0_set = true;
             }
 
-            if (*t0_set && f.pos_fbk != *last_fbk) {
+            if (*t0_set && f.pos_fbk != *last_fbk) 
+            {
                 write_telem_row(*csv, f, *telem_t0);
                 *last_fbk = f.pos_fbk;
             }
