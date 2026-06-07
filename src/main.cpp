@@ -1,3 +1,5 @@
+//348ac50 (HEAD -> jz-f411
+
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
