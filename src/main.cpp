@@ -26,8 +26,8 @@ static bool spi_transfer(int gpio_h,
                          uint8_t* rx,
                          uint32_t speed)
 {
-    lgGpioWrite(gpio_h, CS_GPIO, 0);
-    usleep(CS_SETUP_US);
+    // lgGpioWrite(gpio_h, CS_GPIO, 0);
+    // usleep(CS_SETUP_US);
 
     spi_ioc_transfer tr = {};
     tr.tx_buf        = reinterpret_cast<unsigned long>(tx);
@@ -39,8 +39,8 @@ static bool spi_transfer(int gpio_h,
 
     const bool ok = ioctl(fd, SPI_IOC_MESSAGE(1), &tr) >= 0;
 
-    lgGpioWrite(gpio_h, CS_GPIO, 1);
-    usleep(CS_GAP_US);
+    // lgGpioWrite(gpio_h, CS_GPIO, 1);
+    // usleep(CS_GAP_US);
 
     return ok;
 }
@@ -159,6 +159,19 @@ int main()
 
     const int total_samples = static_cast<int>(profile.size());
 
+
+    {
+        std::ofstream profile_csv("../docs/profile_sent.csv");
+        profile_csv << "t,pos,vel\n";
+        for (size_t i = 0; i < profile.size(); i++) {
+            profile_csv << (i * DT) << "," 
+                        << profile[i].pos << "," 
+                        << profile[i].vel << "\n";
+        }
+        profile_csv.close();
+    }
+
+    
     std::printf("profile computed: %d samples\n", total_samples);
     std::printf("  first: pos=%d vel=%d\n",
                 profile.front().pos,
