@@ -139,19 +139,26 @@ bool spi_init(const char* device, uint32_t speed_hz)
 }
 
 // =============================================================================
-// write_telem_row
+// write_telem_row — write 11 columns: t, pos_cmd, pos_fbk, vel_cmd, vel_fbk,
+//                                      pos_err, vel_err, iq_cmd, i_q_fbk, v_q_cmd, consumed
 // =============================================================================
 static void write_telem_row(std::ofstream& csv,
                             const TelemetryFrame& f,
                             uint32_t t0)
 {
+    int32_t pos_err = f.pos_cmd - f.pos_fbk;
+    int32_t vel_err = f.vel_cmd - f.vel_fbk;
+
     csv << (f.timestamp_ms - t0) << ","
         << f.pos_cmd             << ","
         << f.pos_fbk             << ","
         << f.vel_cmd             << ","
         << f.vel_fbk             << ","
-        << f.iq_cmd             << ","
+        << pos_err               << ","
+        << vel_err               << ","
+        << f.iq_cmd              << ","
         << f.i_q_fbk             << ","
+        << f.v_q_cmd             << ","
         << f.samples_consumed    << "\n";
 }
 
@@ -187,15 +194,11 @@ bool spi_send_block_header(void)
 
 // =============================================================================
 // spi_stream_block — sends up to count DATA frames starting at offset
+// Telemetry frames received in RX are written to CSV with dedup by timestamp
 // =============================================================================
-size_t spi_stream_block(const std::vector<Sample>& profile,
-                        size_t offset,
-                        size_t count,
-                        std::ofstream* csv,
-                        uint32_t* telem_t0,
-                        bool* t0_set,
-                        int32_t* last_fbk,
-                        bool send_header)
+size_t spi_stream_block(const std::vector<Sample>& profile, size_t offset,
+                        size_t count, std::ofstream& csv, uint32_t& telem_t0, bool& t0_set,
+                        uint32_t& last_timestamp, bool send_header)
 {
     if (send_header) 
     {
@@ -211,7 +214,7 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
     {
         return 0;
     }
-
+    
     const size_t end = std::min(offset + count, profile.size());
     size_t sent = 0;
 
@@ -237,24 +240,22 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
 
         sent++;
 
-        // MISO telemetry is currently disabled on STM.
-        // Keep CSV handling guarded; it will become useful again when TX is restored.
-        if (csv && telem_t0 && t0_set && last_fbk) 
+        // Process telemetry frame from RX
+        TelemetryFrame f;
+        std::memcpy(&f, rx, sizeof(TelemetryFrame));
+
+        // Set start timestamp on first valid sample
+        if ((t0_set == false) && f.samples_consumed > 0) 
         {
-            TelemetryFrame f;
-            std::memcpy(&f, rx, sizeof(TelemetryFrame));
+            telem_t0 = f.timestamp_ms;
+            t0_set = true;
+        }
 
-            if (!(*t0_set) && f.samples_consumed > 0) 
-            {
-                *telem_t0 = f.timestamp_ms;
-                *t0_set = true;
-            }
-
-            if (*t0_set && f.pos_fbk != *last_fbk) 
-            {
-                write_telem_row(*csv, f, *telem_t0);
-                *last_fbk = f.pos_fbk;
-            }
+        // Write to CSV if t0 is set and timestamp changed (dedup by timestamp)
+        if ((t0_set == true) && f.timestamp_ms != last_timestamp)
+        {
+            write_telem_row(csv, f, telem_t0);
+            last_timestamp = f.timestamp_ms;
         }
     }
 
@@ -270,11 +271,14 @@ size_t spi_stream_block(const std::vector<Sample>& profile,
 // spi_stream_profile — full producer/consumer model with READY handshake
 // =============================================================================
 size_t spi_stream_profile(const std::vector<Sample>& profile,
-                          std::ofstream* csv,
-                          uint32_t* telem_t0,
-                          bool* t0_set,
-                          int32_t* last_fbk)
+                          std::ofstream& csv,
+                          uint32_t& telem_t0,
+                          bool& t0_set,
+                          uint32_t& last_timestamp)
 {
+    // Write CSV header
+    csv << "t,pos_cmd,pos_fbk,vel_cmd,vel_fbk,pos_err,vel_err,iq_cmd,i_q_fbk,v_q_cmd,consumed\n";
+
     size_t sent = 0;
 
     sent += spi_stream_block(profile,
@@ -283,7 +287,7 @@ size_t spi_stream_profile(const std::vector<Sample>& profile,
                              csv,
                              telem_t0,
                              t0_set,
-                             last_fbk,
+                             last_timestamp,
                              true);
 
     while (sent < profile.size()) {
@@ -291,14 +295,8 @@ size_t spi_stream_profile(const std::vector<Sample>& profile,
             usleep(50);
         }
 
-        const size_t n = spi_stream_block(profile,
-                                          sent,
-                                          REFILL_FRAMES,
-                                          csv,
-                                          telem_t0,
-                                          t0_set,
-                                          last_fbk,
-                                          false);
+        const size_t n = spi_stream_block(profile, sent, REFILL_FRAMES, csv, telem_t0, t0_set,
+                                          last_timestamp, false);
 
         if (n == 0) {
             break;

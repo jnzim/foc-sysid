@@ -290,20 +290,25 @@ int main()
         char fname[64];
         std::snprintf(fname, sizeof(fname), "../docs/run_%03u.csv", run++);
         std::ofstream csv(fname);
-        csv << "t,pos_cmd,pos_fbk,vel_cmd,vel_fbk,pos_err,iq_cmd,i_q_fbk,consumed\n";
+        csv << "t,pos_cmd,pos_fbk,vel_cmd,vel_fbk,pos_err,vel_err,iq_cmd,i_q_fbk,v_q_cmd,consumed\n";
+
         uint32_t t0 = telem.empty() ? 0 : telem.front().timestamp_ms;
+            
         for (const auto& f : telem)
         {
             int32_t pos_err = f.pos_cmd - f.pos_fbk;
             int32_t vel_err = f.vel_cmd - f.vel_fbk;
+        
             csv << (f.timestamp_ms - t0) << ","
                 << f.pos_cmd             << ","
                 << f.pos_fbk             << ","
                 << f.vel_cmd             << ","
                 << f.vel_fbk             << ","
                 << pos_err               << ","
+                << vel_err               << ","
                 << f.iq_cmd              << ","
                 << f.i_q_fbk             << ","
+                << f.v_q_cmd             << ","
                 << f.samples_consumed    << "\n";
         }
         std::printf("wrote %s\n", fname);
