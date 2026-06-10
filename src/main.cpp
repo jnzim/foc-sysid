@@ -1,4 +1,4 @@
-//348ac50 (HEAD -> jz-f411
+
 
 #include <cstdio>
 #include <cstdint>
@@ -15,12 +15,26 @@
 
 #include "protocol.h"
 #include "profile.hpp"
+#include "config.hpp"
 
 #define READY_GPIO 7
 #define CS_GPIO    25
 
 #define CS_SETUP_US 50
 #define CS_GAP_US   200
+
+
+float target_mm = 10;
+float vel_mm_sec = 50;
+float acel_mm_sec_sec = 500;
+
+
+
+const int32_t START_CNT  = 0;
+const int32_t TARGET_CNT = 819;
+const int32_t VEL_CNT    = 2000;
+const int32_t ACCEL_CNT  = 10000;
+const double  DT         = 0.001;
 
 static bool spi_transfer(int gpio_h,
                          int fd,
@@ -148,16 +162,18 @@ static bool send_samples(int gpio_h,
 
 int main()
 {
-    const int32_t START_CNT  = 0;
-    const int32_t TARGET_CNT = 100000;
-    const int32_t VEL_CNT    = 200000;
-    const int32_t ACCEL_CNT  = 500000;
-    const double  DT         = 0.001;
+
 
     std::system("rm -f ../docs/run_*.csv ../docs/run_*.png");
 
-    std::vector<Sample> profile =
-        compute_profile(START_CNT, TARGET_CNT, VEL_CNT, ACCEL_CNT, DT);
+    // std::vector<Sample> profile =
+    //     compute_profile(START_CNT, TARGET_CNT, VEL_CNT, ACCEL_CNT, DT);
+
+    std::vector<Sample> profile = 
+                        compute_profile(START_CNT, 
+                        MACHINE.mm_to_counts(target_mm),  // ✓ Correct
+                          MACHINE.mm_to_counts(vel_mm_sec),
+                          MACHINE.mm_to_counts(acel_mm_sec_sec));
 
     const int total_samples = static_cast<int>(profile.size());
 
@@ -266,7 +282,7 @@ int main()
 
                 /* Build TrajSlot with final position */
                 TrajSlot slot;
-                slot.opcode  = SPI2_OP_DATA;
+                slot.opcode  = SPI2_OP_TELEM_REQ;
                 slot.seq     = drain_seq++;
                 slot.pos_cmd = TARGET_CNT;
                 slot.vel_cmd = 0;
