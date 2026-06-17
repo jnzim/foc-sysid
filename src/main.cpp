@@ -1,365 +1,589 @@
+// src/main.cpp — Raspberry Pi SPI SysID CSV capture + auto plot
+//
+// RPi is SPI master.
+// STM32F411 SPI2 is slave.
+// Reads 32-byte SysIdSample frames from /dev/spidev0.0.
+//
+// Run directory:
+//   /home/jz/trajectory-streamer/build
+//
+// CSV output:
+//   /home/jz/trajectory-streamer/drive_data/sysid_log.csv
+//
+// Plot script:
+//   /home/jz/trajectory-streamer/py-script/plot_sysid.py
+//
+// Expected plot output:
+//   /home/jz/trajectory-streamer/drive_data/sysid_phase_currents.png
+//   /home/jz/trajectory-streamer/drive_data/sysid_dq_current.png
+//   /home/jz/trajectory-streamer/drive_data/sysid_dq_voltage_cmd.png
+//   /home/jz/trajectory-streamer/drive_data/sysid_theta.png
+//   /home/jz/trajectory-streamer/drive_data/sysid_dt.png
 
-
-#include <cstdio>
+#include <cerrno>
+#include <csignal>
 #include <cstdint>
-#include <cstring>
-#include <vector>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <limits.h>
 
 #include <fcntl.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
 #include <linux/spi/spidev.h>
-#include <lgpio.h>
-#include <fstream>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
 
-#include "protocol.h"
-#include "profile.hpp"
-#include "config.hpp"
+#define SYSID_FRAME_LEN 32
 
-#define READY_REFILL_GPIO 7
-#define CS_GPIO    25
+#define DEFAULT_DEV      "/dev/spidev0.0"
+#define DEFAULT_SPEED_HZ 500000u
 
-#define CS_SETUP_US 50
-#define CS_GAP_US   200
+// Program is run from build/, so ../drive_data lands in project root.
+#define DEFAULT_OUTDIR   "../drive_data"
+#define DEFAULT_OUTFILE  "../drive_data/sysid_log.csv"
 
+// Program is run from build/, so this points to project-root script folder.
+#define DEFAULT_PLOT_SCRIPT "../py-script/plot_sysid.py"
 
-// Profile data
-float start_mm              = 0;
-float target_mm             = 125;
-float vel_mm_sec            = 20;
-float acel_mm_sec_sec       = 250;
-const double  DT            = 0.001;
-int START_CNTS              = 0;
-int TARGET_CNTS             = 0;
-int VEL_CNTS_PER_SEC        = 0;
-int ACEL_CNTS_PER_SEC_SEC   = 0;
+#define CAPTURE_SECONDS 1.0
 
+static volatile sig_atomic_t g_run = 1;
 
-static bool spi_transfer(int gpio_h,
-                         int fd,
-                         uint8_t* tx,
-                         uint8_t* rx,
-                         uint32_t speed)
+struct __attribute__((packed)) SysIdSample
 {
-    // lgGpioWrite(gpio_h, CS_GPIO, 0);
-    // usleep(CS_SETUP_US);
+    uint32_t t;
+    int16_t  ia_mA;
+    int16_t  ib_mA;
+    int16_t  ic_mA;
+    int16_t  id_mA;
+    int16_t  iq_mA;
+    int16_t  vd_mV;
+    int16_t  vq_mV;
+    int16_t  theta_mrad;
+    uint16_t adc_a;
+    uint16_t adc_b;
+    uint16_t adc_c;
+    uint16_t flags;
+    uint16_t crc;
+    uint16_t pad;
+};
 
-    spi_ioc_transfer tr = {};
+static_assert(sizeof(SysIdSample) == 32, "SysIdSample must be exactly 32 bytes");
+
+struct CaptureStats
+{
+    uint32_t frames = 0;
+
+    uint32_t first_t = 0;
+    uint32_t last_t = 0;
+    bool have_t = false;
+
+    uint32_t min_dt = 0xFFFFFFFFu;
+    uint32_t max_dt = 0;
+    uint64_t sum_dt = 0;
+    uint32_t dt_count = 0;
+
+    uint32_t zero_dt_count = 0;
+    uint32_t big_dt_count = 0;
+};
+
+static void sigint_handler(int sig)
+{
+    (void)sig;
+    g_run = 0;
+}
+
+static double monotonic_seconds()
+{
+    timespec ts{};
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    {
+        std::perror("clock_gettime");
+        return 0.0;
+    }
+
+    return static_cast<double>(ts.tv_sec) +
+           static_cast<double>(ts.tv_nsec) * 1.0e-9;
+}
+
+static uint16_t get_u16_le(const uint8_t *p)
+{
+    return static_cast<uint16_t>(p[0]) |
+           static_cast<uint16_t>(static_cast<uint16_t>(p[1]) << 8);
+}
+
+static int16_t get_s16_le(const uint8_t *p)
+{
+    return static_cast<int16_t>(get_u16_le(p));
+}
+
+static uint32_t get_u32_le(const uint8_t *p)
+{
+    return static_cast<uint32_t>(p[0]) |
+           (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) |
+           (static_cast<uint32_t>(p[3]) << 24);
+}
+
+static SysIdSample decode_sysid_sample(const uint8_t rx[SYSID_FRAME_LEN])
+{
+    SysIdSample s{};
+
+    s.t          = get_u32_le(&rx[0]);
+    s.ia_mA      = get_s16_le(&rx[4]);
+    s.ib_mA      = get_s16_le(&rx[6]);
+    s.ic_mA      = get_s16_le(&rx[8]);
+    s.id_mA      = get_s16_le(&rx[10]);
+    s.iq_mA      = get_s16_le(&rx[12]);
+    s.vd_mV      = get_s16_le(&rx[14]);
+    s.vq_mV      = get_s16_le(&rx[16]);
+    s.theta_mrad = get_s16_le(&rx[18]);
+    s.adc_a      = get_u16_le(&rx[20]);
+    s.adc_b      = get_u16_le(&rx[22]);
+    s.adc_c      = get_u16_le(&rx[24]);
+    s.flags      = get_u16_le(&rx[26]);
+    s.crc        = get_u16_le(&rx[28]);
+    s.pad        = get_u16_le(&rx[30]);
+
+    return s;
+}
+
+static int mkdir_if_needed(const char *path)
+{
+    struct stat st{};
+
+    if (stat(path, &st) == 0)
+    {
+        if (S_ISDIR(st.st_mode))
+        {
+            return 0;
+        }
+
+        std::fprintf(stderr, "Path exists but is not a directory: %s\n", path);
+        return -1;
+    }
+
+    if (mkdir(path, 0775) != 0)
+    {
+        if (errno == EEXIST)
+        {
+            return 0;
+        }
+
+        std::perror("mkdir");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int spi_open_configure(const char *dev, uint32_t speed_hz)
+{
+    int fd = open(dev, O_RDWR);
+    if (fd < 0)
+    {
+        std::perror("open SPI device");
+        return -1;
+    }
+
+    uint8_t mode = SPI_MODE_1;
+    uint8_t bits = 8;
+
+    if (ioctl(fd, SPI_IOC_WR_MODE, &mode) < 0)
+    {
+        std::perror("SPI_IOC_WR_MODE");
+        close(fd);
+        return -1;
+    }
+
+    if (ioctl(fd, SPI_IOC_RD_MODE, &mode) < 0)
+    {
+        std::perror("SPI_IOC_RD_MODE");
+        close(fd);
+        return -1;
+    }
+
+    if (ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0)
+    {
+        std::perror("SPI_IOC_WR_BITS_PER_WORD");
+        close(fd);
+        return -1;
+    }
+
+    if (ioctl(fd, SPI_IOC_RD_BITS_PER_WORD, &bits) < 0)
+    {
+        std::perror("SPI_IOC_RD_BITS_PER_WORD");
+        close(fd);
+        return -1;
+    }
+
+    if (ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed_hz) < 0)
+    {
+        std::perror("SPI_IOC_WR_MAX_SPEED_HZ");
+        close(fd);
+        return -1;
+    }
+
+    if (ioctl(fd, SPI_IOC_RD_MAX_SPEED_HZ, &speed_hz) < 0)
+    {
+        std::perror("SPI_IOC_RD_MAX_SPEED_HZ");
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[SYSID_FRAME_LEN])
+{
+    uint8_t tx[SYSID_FRAME_LEN]{};
+    std::memset(rx, 0, SYSID_FRAME_LEN);
+
+    spi_ioc_transfer tr{};
     tr.tx_buf        = reinterpret_cast<unsigned long>(tx);
     tr.rx_buf        = reinterpret_cast<unsigned long>(rx);
-    tr.len           = SPI2_TRANSACTION_BYTES;
-    tr.speed_hz      = speed;
+    tr.len           = SYSID_FRAME_LEN;
+    tr.speed_hz      = speed_hz;
     tr.bits_per_word = 8;
-    tr.cs_change     = 0;
+    tr.delay_usecs   = 0;
 
-    const bool ok = ioctl(fd, SPI_IOC_MESSAGE(1), &tr) >= 0;
+    int ret = ioctl(fd, SPI_IOC_MESSAGE(1), &tr);
+    if (ret < 1)
+    {
+        std::perror("SPI_IOC_MESSAGE");
+        return -1;
+    }
 
-    // lgGpioWrite(gpio_h, CS_GPIO, 1);
-    // usleep(CS_GAP_US);
-
-    return ok;
+    return 0;
 }
 
-static bool send_block_header(int gpio_h,
-                              int fd,
-                              uint8_t* tx,
-                              uint8_t* rx,
-                              uint32_t speed,
-                              int total_samples)
+static FILE *open_output_file(const char *path)
 {
-    /* Flush stale telem */
-    for (int i = 0; i < 10; i++)
+    FILE *f = std::fopen(path, "w");
+    if (!f)
     {
-        std::memset(tx, 0, SPI2_TRANSACTION_BYTES);
-        std::memset(rx, 0, SPI2_TRANSACTION_BYTES);
-        tx[0] = SPI2_OP_NOP;
-        spi_transfer(gpio_h, fd, tx, rx, speed);
-        usleep(CS_GAP_US);
+        std::fprintf(stderr, "Failed to open output file: %s\n", path);
+        std::perror("fopen");
+        return nullptr;
     }
 
-    /* Build and send BLOCK_HDR packet */
-    std::memset(tx, 0, SPI2_TRANSACTION_BYTES);
-    std::memset(rx, 0, SPI2_TRANSACTION_BYTES);
-
-    tx[0] = SPI2_OP_BLOCK_HDR;
-    tx[1] = static_cast<uint8_t>(total_samples & 0xFF);
-    tx[2] = static_cast<uint8_t>((total_samples >> 8) & 0xFF);
-    
-    /* Calculate CRC-16 over bytes 0..13 */
-    uint16_t crc = crc16_calc(tx, 14);
-    tx[14] = static_cast<uint8_t>(crc & 0xFF);
-    tx[15] = static_cast<uint8_t>((crc >> 8) & 0xFF);
-
-    std::printf("BLOCK_HDR: samples=%d crc16=%04x\n", total_samples, crc);
-
-    if (!spi_transfer(gpio_h, fd, tx, rx, speed)) {
-        perror("spi_transfer BLOCK_HDR");
-        return false;
-    }
-
-    return true;
+    return f;
 }
 
-bool collecting = false;
-static bool send_samples(int gpio_h, int fd,
-                         uint8_t* tx,
-                         uint8_t* rx,
-                         uint32_t speed,
-                         const std::vector<Sample>& profile,
-                         size_t profile_offset,     
-                         size_t block_size,         
-                         std::vector<TelemetryFrame>& telem)
+static void write_csv_header(FILE *f)
 {
-    // Don't clear telem — append to existing telemetry
-    telem.reserve(telem.size() + block_size);
-    
-    for (size_t i = 0; i < block_size; i++) 
-    {
-        const Sample& s = profile[profile_offset + i]; // keep track of where we are
-        
-        std::memset(tx, 0, SPI2_TRANSACTION_BYTES);
-        std::memset(rx, 0, SPI2_TRANSACTION_BYTES);
-        
-        TrajSlot slot;
-        slot.opcode     = SPI2_OP_DATA;
-        slot.seq        = static_cast<uint8_t>(i & 0xFF);
-        slot.pos_cmd    = static_cast<int32_t>(s.pos);
-        slot.vel_cmd    = static_cast<int32_t>(s.vel);
-        slot.reserved   = 0;
-        slot.crc16      = crc16_calc((uint8_t*)&slot, TRAJ_CRC_LEN);
-        
-        std::memcpy(tx, &slot, sizeof(TrajSlot));
-        if (!spi_transfer(gpio_h, fd, tx, rx, speed)) {
-            std::fprintf(stderr, "spi_transfer DATA failed at sample %zu\n", i);
-            return false;
-        }
-        
-        TelemetryFrame f;
-        std::memcpy(&f, rx, sizeof(TelemetryFrame));
-        if (f.samples_consumed == 1) collecting = true;
-        
-        if (collecting && (telem.empty() || f.samples_consumed > telem.back().samples_consumed)) {
-            telem.push_back(f);
-        }
-        
-        // if (i < 5 || (i % 200) == 0) {
-        //     std::printf("TX[%5zu]: pos=%d vel=%d | telem: state=%u consumed=%u\n",
-        //                 i, slot.pos_cmd, slot.vel_cmd, f.drive_state, f.samples_consumed);
-        //}
-    }
-    return true;
-}
-static bool drain(int gpio_h, int fd, uint8_t* tx, uint8_t* rx,  uint32_t speed, std::vector<TelemetryFrame>& telem)
-{
-    static uint8_t drain_seq = 0;
-    
-    std::memset(tx, 0, SPI2_TRANSACTION_BYTES);
-    std::memset(rx, 0, SPI2_TRANSACTION_BYTES);
-    
-    /* Build TrajSlot with telemetry request */
-    TrajSlot slot;
-    slot.opcode     = SPI2_OP_TELEM_REQ;
-    slot.seq        = drain_seq++;
-    slot.pos_cmd    = TARGET_CNTS;
-    slot.vel_cmd    = 0;
-    slot.reserved   = 0;
-    slot.crc16 = crc16_calc((uint8_t*)&slot, TRAJ_CRC_LEN);
-    
-    std::memcpy(tx, &slot, sizeof(TrajSlot));
-    
-    if (!spi_transfer(gpio_h, fd, tx, rx, speed)) 
-    {
-        std::fprintf(stderr, "spi_transfer TELEM_REQ failed\n");
-        return false;
-    }
-    
-    TelemetryFrame f;
-    std::memcpy(&f, rx, sizeof(TelemetryFrame));
-    
-    if (f.samples_consumed > 0 && (telem.empty() || f.timestamp_ms != telem.back().timestamp_ms)) 
-    {
-        telem.push_back(f);
-    }
-    
-    return true;
+    std::fprintf(
+        f,
+        "host_time_s,"
+        "frame,"
+        "t,"
+        "dt,"
+        "ia_mA,"
+        "ib_mA,"
+        "ic_mA,"
+        "id_mA,"
+        "iq_mA,"
+        "vd_mV,"
+        "vq_mV,"
+        "theta_mrad,"
+        "adc_a,"
+        "adc_b,"
+        "adc_c,"
+        "flags,"
+        "crc,"
+        "pad\n"
+    );
 }
 
-
-int main()
+static void write_csv_sample(FILE *f,
+                             double host_time_s,
+                             uint32_t frame,
+                             const SysIdSample *s,
+                             uint32_t dt)
 {
+    std::fprintf(
+        f,
+        "%.9f,"
+        "%u,"
+        "%u,"
+        "%u,"
+        "%d,"
+        "%d,"
+        "%d,"
+        "%d,"
+        "%d,"
+        "%d,"
+        "%d,"
+        "%d,"
+        "%u,"
+        "%u,"
+        "%u,"
+        "0x%04X,"
+        "%u,"
+        "%u\n",
+        host_time_s,
+        frame,
+        s->t,
+        dt,
+        s->ia_mA,
+        s->ib_mA,
+        s->ic_mA,
+        s->id_mA,
+        s->iq_mA,
+        s->vd_mV,
+        s->vq_mV,
+        s->theta_mrad,
+        s->adc_a,
+        s->adc_b,
+        s->adc_c,
+        s->flags,
+        s->crc,
+        s->pad
+    );
+}
 
-
-    std::system("rm -f ../docs/run_*.csv ../docs/run_*.png");
-    START_CNTS              = MACHINE.mm_to_counts(start_mm);
-    TARGET_CNTS             = MACHINE.mm_to_counts(target_mm);
-    VEL_CNTS_PER_SEC        =  MACHINE.mm_to_counts(vel_mm_sec);
-    ACEL_CNTS_PER_SEC_SEC   = MACHINE.mm_to_counts(acel_mm_sec_sec);
-    std::vector<Sample> profile = compute_profile(START_CNTS, TARGET_CNTS, VEL_CNTS_PER_SEC, ACEL_CNTS_PER_SEC_SEC, DT);
-
-    const int total_samples = static_cast<int>(profile.size());
-
-
+static void update_stats(CaptureStats *stats, const SysIdSample *s, uint32_t dt)
+{
+    if (!stats->have_t)
     {
-        std::ofstream profile_csv("../docs/profile_sent.csv");
-        profile_csv << "t,pos,vel\n";
-        for (size_t i = 0; i < profile.size(); i++) {
-            profile_csv << (i * DT) << "," 
-                        << profile[i].pos << "," 
-                        << profile[i].vel << "\n";
-        }
-        profile_csv.close();
+        stats->first_t = s->t;
+        stats->last_t = s->t;
+        stats->have_t = true;
+        return;
     }
 
-    
-    std::printf("profile computed: %d samples\n", total_samples);
-    std::printf("  first: pos=%d vel=%d\n",
-                profile.front().pos,
-                profile.front().vel);
-    std::printf("  last:  pos=%d vel=%d\n",
-                profile.back().pos,
-                profile.back().vel);
+    stats->last_t = s->t;
 
-    int gpio_h = lgGpiochipOpen(0);
-    if (gpio_h < 0) {
-        std::fprintf(stderr, "lgGpiochipOpen failed\n");
-        return 1;
-    }
+    stats->sum_dt += dt;
+    stats->dt_count++;
 
-    int rc = lgGpioClaimInput(gpio_h, LG_SET_PULL_NONE, READY_REFILL_GPIO);
-    if (rc < 0) {
-        std::fprintf(stderr, "claim READY failed: %s\n", lguErrorText(rc));
-        lgGpiochipClose(gpio_h);
-        return 1;
-    }
-
-    rc = lgGpioClaimOutput(gpio_h, 0, CS_GPIO, 1);
-    if (rc < 0) {
-        std::fprintf(stderr, "claim CS failed: %s\n", lguErrorText(rc));
-        lgGpiochipClose(gpio_h);
-        return 1;
-    }
-
-    int fd = open("/dev/spidev0.0", O_RDWR);
-    if (fd < 0) {
-        perror("open spidev");
-        lgGpiochipClose(gpio_h);
-        return 1;
-    }
-
-    uint8_t  mode  = SPI_MODE_1;
-    uint8_t  bits  = 8;
-    uint32_t speed = 1000000;
-
-    if (ioctl(fd, SPI_IOC_WR_MODE, &mode) < 0) {
-        perror("SPI_IOC_WR_MODE");
-        close(fd);
-        lgGpiochipClose(gpio_h);
-        return 1;
-    }
-
-    if (ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0) {
-        perror("SPI_IOC_WR_BITS_PER_WORD");
-        close(fd);
-        lgGpiochipClose(gpio_h);
-        return 1;
-    }
-
-    if (ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0) {
-        perror("SPI_IOC_WR_MAX_SPEED_HZ");
-        close(fd);
-        lgGpiochipClose(gpio_h);
-        return 1;
-    }
-
-    uint8_t tx[SPI2_TRANSACTION_BYTES] = {};
-    uint8_t rx[SPI2_TRANSACTION_BYTES] = {};
-
-    std::vector<TelemetryFrame> telem;
-    size_t profile_offset   = 0;
-    uint32_t run            = 0;
-
-    while (true)
+    if (dt < stats->min_dt)
     {
-        std::printf("press enter to stream profile\n");
-        getchar();
-
-        if (!send_block_header(gpio_h, fd, tx, rx, speed, total_samples)) 
-        {
-            continue;
-        }
-
-        usleep(200);
-        int block_size = 0;
-
-        if (profile.size() >= 2048)         { block_size = 2048; }
-        else                                { block_size = profile.size();}
-        
-        if (!send_samples(gpio_h, fd, tx, rx, speed, profile, profile_offset, block_size,  telem))
-        {
-            continue;
-        }
-        profile_offset = block_size;
-
-        //Drain refill loop: 
-        // keep sending final position until STM finishes 
-        // On ready READY_REFILL_GPIO, send new 1/2 block
-        {
-            while (profile_offset < profile.size() || telem.back().samples_consumed < profile.size()) 
-            {
-              
-                
-                int ready = lgGpioRead(gpio_h, READY_REFILL_GPIO);
-                if (ready == 1 && profile_offset < profile.size()) 
-                {
-                    // Send next 1024
-                    size_t num_profile_frames = std::min(size_t(1024), profile.size() - profile_offset);
-                    send_samples(gpio_h, fd, tx, rx, speed, profile, profile_offset, num_profile_frames, telem);
-                    profile_offset += num_profile_frames;
-                } 
-                else
-                {
-                    // Drain telemetry
-                    drain(gpio_h, fd, tx, rx, speed, telem);
-                }
-            }
-
-        }
-
-        std::printf("done. sent=%d\n", total_samples);
-        char fname[64];
-        std::snprintf(fname, sizeof(fname), "../docs/run_%03u.csv", run++);
-        std::ofstream csv(fname);
-        csv << "t,pos_cmd,pos_fbk,vel_cmd,vel_fbk,pos_err,vel_err,iq_cmd,i_q_fbk,v_q_cmd,consumed\n";
-
-        uint32_t t0 = telem.empty() ? 0 : telem.front().timestamp_ms;
-            
-        for (const auto& f : telem)
-        {
-            int32_t pos_err = f.pos_cmd - f.pos_fbk;
-            int32_t vel_err = f.vel_cmd - f.vel_fbk;
-        
-            csv << (f.timestamp_ms - t0) << ","
-                << f.pos_cmd             << ","
-                << f.pos_fbk             << ","
-                << f.vel_cmd             << ","
-                << f.vel_fbk             << ","
-                << pos_err               << ","
-                << vel_err               << ","
-                << f.iq_cmd              << ","
-                << f.i_q_fbk             << ","
-                << f.v_q_cmd             << ","
-                << f.samples_consumed    << "\n";
-        }
-        std::printf("wrote %s\n", fname);
-
-        char cmd[128];
-        std::snprintf(cmd, sizeof(cmd), "python3 ../py-script/plotprof.py %s", fname);
-        std::system(cmd);
+        stats->min_dt = dt;
     }
 
-    lgGpioWrite(gpio_h, CS_GPIO, 1);
+    if (dt > stats->max_dt)
+    {
+        stats->max_dt = dt;
+    }
+
+    if (dt == 0)
+    {
+        stats->zero_dt_count++;
+    }
+
+    if (dt > 100)
+    {
+        stats->big_dt_count++;
+    }
+}
+
+static void print_summary(const CaptureStats *stats, double elapsed_s, const char *out_path)
+{
+    const double host_frame_rate =
+        (elapsed_s > 0.0) ? static_cast<double>(stats->frames) / elapsed_s : 0.0;
+
+    const uint32_t sample_delta =
+        stats->have_t ? (stats->last_t - stats->first_t) : 0;
+
+    const double estimated_stm_rate =
+        (elapsed_s > 0.0) ? static_cast<double>(sample_delta) / elapsed_s : 0.0;
+
+    const double avg_dt =
+        (stats->dt_count > 0)
+            ? static_cast<double>(stats->sum_dt) / static_cast<double>(stats->dt_count)
+            : 0.0;
+
+    std::printf("\nCapture summary\n");
+    std::printf("---------------\n");
+    std::printf("File                 : %s\n", out_path);
+    std::printf("Elapsed              : %.6f s\n", elapsed_s);
+    std::printf("Frames captured      : %u\n", stats->frames);
+    std::printf("Host SPI frame rate  : %.1f frames/s\n", host_frame_rate);
+    std::printf("First STM t          : %u\n", stats->first_t);
+    std::printf("Last STM t           : %u\n", stats->last_t);
+    std::printf("STM sample delta     : %u\n", sample_delta);
+    std::printf("Estimated STM rate   : %.1f samples/s\n", estimated_stm_rate);
+    std::printf("dt min/avg/max       : %u / %.2f / %u\n",
+                stats->min_dt == 0xFFFFFFFFu ? 0 : stats->min_dt,
+                avg_dt,
+                stats->max_dt);
+    std::printf("dt == 0 count        : %u\n", stats->zero_dt_count);
+    std::printf("dt > 100 count       : %u\n", stats->big_dt_count);
+}
+
+static int run_plot_script(const char *csv_path)
+{
+    const char *plot_script = DEFAULT_PLOT_SCRIPT;
+
+    char cwd[PATH_MAX];
+
+    std::printf("\nPlot setup\n");
+    std::printf("----------\n");
+
+    if (getcwd(cwd, sizeof(cwd)) != nullptr)
+    {
+        std::printf("cwd         : %s\n", cwd);
+    }
+    else
+    {
+        std::perror("getcwd");
+    }
+
+    std::printf("csv path    : %s\n", csv_path);
+    std::printf("plot script : %s\n", plot_script);
+
+    if (access(csv_path, R_OK) != 0)
+    {
+        std::fprintf(stderr, "CSV not readable: %s\n", csv_path);
+        std::perror("access csv");
+        return -1;
+    }
+
+    if (access(plot_script, R_OK) != 0)
+    {
+        std::fprintf(stderr, "Plot script not readable: %s\n", plot_script);
+        std::perror("access plot_script");
+        return -1;
+    }
+
+    char cmd[1024];
+
+    std::snprintf(
+        cmd,
+        sizeof(cmd),
+        "python3 -u \"%s\" \"%s\"",
+        plot_script,
+        csv_path
+    );
+
+    std::printf("\nRunning plot script\n");
+    std::printf("-------------------\n");
+    std::printf("%s\n", cmd);
+
+    int ret = std::system(cmd);
+
+    if (ret != 0)
+    {
+        std::fprintf(stderr, "plot_sysid.py failed with code: %d\n", ret);
+        return -1;
+    }
+
+    std::printf("\nPlot script completed.\n");
+    std::printf("Expected plots in CSV dir:\n");
+    std::printf("  ../drive_data\n");
+
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    const char *dev = DEFAULT_DEV;
+    uint32_t speed_hz = DEFAULT_SPEED_HZ;
+    const char *out_path = DEFAULT_OUTFILE;
+
+    if (argc >= 2)
+    {
+        dev = argv[1];
+    }
+
+    if (argc >= 3)
+    {
+        speed_hz = static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10));
+    }
+
+    if (argc >= 4)
+    {
+        out_path = argv[3];
+    }
+
+    std::signal(SIGINT, sigint_handler);
+
+    if (mkdir_if_needed(DEFAULT_OUTDIR) != 0)
+    {
+        return 1;
+    }
+
+    std::printf("SPI device  : %s\n", dev);
+    std::printf("SPI speed   : %u Hz\n", speed_hz);
+    std::printf("Output      : %s\n", out_path);
+    std::printf("Plot script : %s\n", DEFAULT_PLOT_SCRIPT);
+    std::printf("Capture     : %.3f seconds\n", CAPTURE_SECONDS);
+
+    FILE *f = open_output_file(out_path);
+    if (!f)
+    {
+        return 1;
+    }
+
+    int fd = spi_open_configure(dev, speed_hz);
+    if (fd < 0)
+    {
+        std::fclose(f);
+        return 1;
+    }
+
+    write_csv_header(f);
+
+    CaptureStats stats{};
+
+    uint32_t last_t = 0;
+    bool have_last_t = false;
+
+    const double t0 = monotonic_seconds();
+
+    while (g_run)
+    {
+        const double now = monotonic_seconds();
+        const double elapsed = now - t0;
+
+        if (elapsed >= CAPTURE_SECONDS)
+        {
+            break;
+        }
+
+        uint8_t rx[SYSID_FRAME_LEN];
+
+        if (spi_read_frame(fd, speed_hz, rx) < 0)
+        {
+            close(fd);
+            std::fclose(f);
+            return 1;
+        }
+
+        SysIdSample s = decode_sysid_sample(rx);
+
+        uint32_t dt = 0;
+        if (have_last_t)
+        {
+            dt = s.t - last_t;
+        }
+
+        last_t = s.t;
+        have_last_t = true;
+
+        write_csv_sample(f, elapsed, stats.frames, &s, dt);
+        update_stats(&stats, &s, dt);
+
+        stats.frames++;
+    }
+
+    const double elapsed_total = monotonic_seconds() - t0;
+
+    std::fflush(f);
+    std::fclose(f);
     close(fd);
-    lgGpiochipClose(gpio_h);
+
+    print_summary(&stats, elapsed_total, out_path);
+
+    if (run_plot_script(out_path) != 0)
+    {
+        return 1;
+    }
+
     return 0;
 }
