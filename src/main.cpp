@@ -122,12 +122,12 @@ static bool send_samples(int gpio_h, int fd,
         std::memset(rx, 0, SPI2_TRANSACTION_BYTES);
         
         TrajSlot slot;
-        slot.opcode  = SPI2_OP_DATA;
-        slot.seq     = static_cast<uint8_t>(i & 0xFF);
-        slot.pos_cmd = static_cast<int32_t>(s.pos);
-        slot.vel_cmd = static_cast<int32_t>(s.vel);
-        slot.reserved = 0;
-        slot.crc16 = crc16_calc((uint8_t*)&slot, TRAJ_CRC_LEN);
+        slot.opcode     = SPI2_OP_DATA;
+        slot.seq        = static_cast<uint8_t>(i & 0xFF);
+        slot.pos_cmd    = static_cast<int32_t>(s.pos);
+        slot.vel_cmd    = static_cast<int32_t>(s.vel);
+        slot.reserved   = 0;
+        slot.crc16      = crc16_calc((uint8_t*)&slot, TRAJ_CRC_LEN);
         
         std::memcpy(tx, &slot, sizeof(TrajSlot));
         if (!spi_transfer(gpio_h, fd, tx, rx, speed)) {
@@ -307,8 +307,9 @@ int main()
         {
             while (profile_offset < profile.size() || telem.back().samples_consumed < profile.size()) 
             {
+              
+                
                 int ready = lgGpioRead(gpio_h, READY_REFILL_GPIO);
-
                 if (ready == 1 && profile_offset < profile.size()) 
                 {
                     // Send next 1024
