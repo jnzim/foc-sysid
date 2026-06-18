@@ -17,6 +17,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
+ADC_A_OFFSET = 2084
+ADC_B_OFFSET = 2088
+ADC_C_OFFSET = 2032
+
+
 def require_columns(df, cols):
     missing = [c for c in cols if c not in df.columns]
     if missing:
@@ -28,6 +33,86 @@ def save_plot(path):
     plt.savefig(path, dpi=160)
     plt.close()
     print(f"wrote: {path}")
+
+
+def noise_stats(series, window=31):
+    """
+    Estimate high-frequency noise by subtracting a rolling average.
+
+    rms_noise:
+        RMS of signal - rolling_average(signal)
+
+    p99_p1:
+        Robust peak-to-peak estimate. Ignores rare extreme outliers better
+        than max-min.
+    """
+    y = pd.to_numeric(series, errors="coerce").dropna()
+
+    if y.empty:
+        return {
+            "mean": 0.0,
+            "std": 0.0,
+            "rms_noise": 0.0,
+            "p99_p1": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "abs_max": 0.0,
+        }
+
+    if len(y) < window:
+        noise = y - y.mean()
+    else:
+        trend = y.rolling(window, center=True, min_periods=1).mean()
+        noise = y - trend
+
+    return {
+        "mean": float(y.mean()),
+        "std": float(y.std()),
+        "rms_noise": float((noise * noise).mean() ** 0.5),
+        "p99_p1": float(noise.quantile(0.99) - noise.quantile(0.01)),
+        "min": float(y.min()),
+        "max": float(y.max()),
+        "abs_max": float(y.abs().max()),
+    }
+
+
+def stats_text(name, stats, unit):
+    return (
+        f"{name}: mean={stats['mean']:.1f} {unit}, "
+        f"rms_noise={stats['rms_noise']:.1f} {unit}, "
+        f"p99-p1={stats['p99_p1']:.1f} {unit}"
+    )
+
+
+def annotate_stats(lines):
+    text = "\n".join(lines)
+    plt.gca().text(
+        0.01,
+        0.99,
+        text,
+        transform=plt.gca().transAxes,
+        va="top",
+        ha="left",
+        fontsize=9,
+        bbox=dict(boxstyle="round", alpha=0.15),
+    )
+
+
+def print_stats_block(title, stats_by_name, unit):
+    print("")
+    print(title)
+    print("-" * len(title))
+
+    for name, stats in stats_by_name.items():
+        print(
+            f"{name:8s} "
+            f"mean={stats['mean']:9.2f} {unit}, "
+            f"std={stats['std']:9.2f} {unit}, "
+            f"rms_noise={stats['rms_noise']:9.2f} {unit}, "
+            f"p99-p1={stats['p99_p1']:9.2f} {unit}, "
+            f"min={stats['min']:9.2f}, "
+            f"max={stats['max']:9.2f}"
+        )
 
 
 def main():
@@ -67,10 +152,95 @@ def main():
             "vd_mV",
             "vq_mV",
             "theta_mrad",
+            "adc_a",
+            "adc_b",
+            "adc_c",
         ],
     )
 
     x = df["host_time_s"]
+
+    # Derived columns
+    df["i_sum_mA"] = df["ia_mA"] + df["ib_mA"] + df["ic_mA"]
+
+    df["adc_a_err"] = df["adc_a"] - ADC_A_OFFSET
+    df["adc_b_err"] = df["adc_b"] - ADC_B_OFFSET
+    df["adc_c_err"] = df["adc_c"] - ADC_C_OFFSET
+
+    # Stats
+    ia_stats = noise_stats(df["ia_mA"])
+    ib_stats = noise_stats(df["ib_mA"])
+    ic_stats = noise_stats(df["ic_mA"])
+
+    id_stats = noise_stats(df["id_mA"])
+    iq_stats = noise_stats(df["iq_mA"])
+
+    isum_stats = noise_stats(df["i_sum_mA"])
+
+    adc_a_stats = noise_stats(df["adc_a"])
+    adc_b_stats = noise_stats(df["adc_b"])
+    adc_c_stats = noise_stats(df["adc_c"])
+
+    adc_a_err_stats = noise_stats(df["adc_a_err"])
+    adc_b_err_stats = noise_stats(df["adc_b_err"])
+    adc_c_err_stats = noise_stats(df["adc_c_err"])
+
+    print("")
+    print("first current rows")
+    print("------------------")
+    print(
+        df[
+            [
+                "ia_mA",
+                "ib_mA",
+                "ic_mA",
+                "i_sum_mA",
+                "id_mA",
+                "iq_mA",
+                "adc_a",
+                "adc_b",
+                "adc_c",
+            ]
+        ].head(20)
+    )
+
+    print_stats_block(
+        "phase current stats",
+        {
+            "ia": ia_stats,
+            "ib": ib_stats,
+            "ic": ic_stats,
+            "sum": isum_stats,
+        },
+        "mA",
+    )
+
+    print_stats_block(
+        "dq current stats",
+        {
+            "id": id_stats,
+            "iq": iq_stats,
+        },
+        "mA",
+    )
+
+    print_stats_block(
+        "raw ADC stats",
+        {
+            "adc_a": adc_a_stats,
+            "adc_b": adc_b_stats,
+            "adc_c": adc_c_stats,
+        },
+        "cnt",
+    )
+
+    print("")
+    print("current sum check")
+    print("-----------------")
+    print(f"mean i_sum_mA    : {df['i_sum_mA'].mean():.2f}")
+    print(f"min i_sum_mA     : {df['i_sum_mA'].min():.2f}")
+    print(f"max i_sum_mA     : {df['i_sum_mA'].max():.2f}")
+    print(f"abs max i_sum_mA : {df['i_sum_mA'].abs().max():.2f}")
 
     # -------------------------------------------------------------------------
     # Phase currents
@@ -79,6 +249,13 @@ def main():
     plt.plot(x, df["ia_mA"], label="ia_mA")
     plt.plot(x, df["ib_mA"], label="ib_mA")
     plt.plot(x, df["ic_mA"], label="ic_mA")
+    annotate_stats(
+        [
+            stats_text("ia", ia_stats, "mA"),
+            stats_text("ib", ib_stats, "mA"),
+            stats_text("ic", ic_stats, "mA"),
+        ]
+    )
     plt.xlabel("host_time_s")
     plt.ylabel("current (mA)")
     plt.title("SysID phase currents")
@@ -87,11 +264,78 @@ def main():
     save_plot(out_dir / "sysid_phase_currents.png")
 
     # -------------------------------------------------------------------------
+    # Phase-current sum
+    # -------------------------------------------------------------------------
+    plt.figure(figsize=(12, 6))
+    plt.plot(x, df["i_sum_mA"], label="ia + ib + ic")
+    plt.axhline(0, linestyle="--", linewidth=1)
+    annotate_stats(
+        [
+            stats_text("sum", isum_stats, "mA"),
+            f"abs max={df['i_sum_mA'].abs().max():.1f} mA",
+        ]
+    )
+    plt.xlabel("host_time_s")
+    plt.ylabel("current sum (mA)")
+    plt.title("SysID phase current sum")
+    plt.grid(True)
+    plt.legend()
+    save_plot(out_dir / "sysid_phase_current_sum.png")
+
+    # -------------------------------------------------------------------------
+    # Raw ADC counts
+    # -------------------------------------------------------------------------
+    plt.figure(figsize=(12, 6))
+    plt.plot(x, df["adc_a"], label="adc_a")
+    plt.plot(x, df["adc_b"], label="adc_b")
+    plt.plot(x, df["adc_c"], label="adc_c")
+    annotate_stats(
+        [
+            stats_text("adc_a", adc_a_stats, "cnt"),
+            stats_text("adc_b", adc_b_stats, "cnt"),
+            stats_text("adc_c", adc_c_stats, "cnt"),
+        ]
+    )
+    plt.xlabel("host_time_s")
+    plt.ylabel("ADC counts")
+    plt.title("SysID raw ADC current-sense counts")
+    plt.grid(True)
+    plt.legend()
+    save_plot(out_dir / "sysid_raw_adc_counts.png")
+
+    # -------------------------------------------------------------------------
+    # Raw ADC offset error
+    # -------------------------------------------------------------------------
+    plt.figure(figsize=(12, 6))
+    plt.plot(x, df["adc_a_err"], label="adc_a - offset")
+    plt.plot(x, df["adc_b_err"], label="adc_b - offset")
+    plt.plot(x, df["adc_c_err"], label="adc_c - offset")
+    annotate_stats(
+        [
+            stats_text("adc_a_err", adc_a_err_stats, "cnt"),
+            stats_text("adc_b_err", adc_b_err_stats, "cnt"),
+            stats_text("adc_c_err", adc_c_err_stats, "cnt"),
+        ]
+    )
+    plt.xlabel("host_time_s")
+    plt.ylabel("ADC counts from offset")
+    plt.title("SysID raw ADC offset error")
+    plt.grid(True)
+    plt.legend()
+    save_plot(out_dir / "sysid_raw_adc_offset_error.png")
+
+    # -------------------------------------------------------------------------
     # D/Q currents
     # -------------------------------------------------------------------------
     plt.figure(figsize=(12, 6))
     plt.plot(x, df["id_mA"], label="id_mA")
     plt.plot(x, df["iq_mA"], label="iq_mA")
+    annotate_stats(
+        [
+            stats_text("id", id_stats, "mA"),
+            stats_text("iq", iq_stats, "mA"),
+        ]
+    )
     plt.xlabel("host_time_s")
     plt.ylabel("current (mA)")
     plt.title("SysID d/q currents")
@@ -127,8 +371,16 @@ def main():
     # -------------------------------------------------------------------------
     # dt
     # -------------------------------------------------------------------------
+    dt_stats = noise_stats(df["dt"])
+
     plt.figure(figsize=(12, 6))
     plt.plot(x, df["dt"], label="dt")
+    annotate_stats(
+        [
+            stats_text("dt", dt_stats, "ticks"),
+            f"median={df['dt'].median():.1f} ticks",
+        ]
+    )
     plt.xlabel("host_time_s")
     plt.ylabel("STM sample delta")
     plt.title("SysID SPI sample delta")
@@ -136,6 +388,7 @@ def main():
     plt.legend()
     save_plot(out_dir / "sysid_dt.png")
 
+    print("")
     print("done")
     return 0
 
