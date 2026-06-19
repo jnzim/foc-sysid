@@ -5,7 +5,11 @@
 // Reads 32-byte SysIdSample frames from /dev/spidev0.0.
 //
 // CS is GPIO25, driven manually via lgpio (active low).
-// spidev CE0 is not used for CS — set SPI_NO_CS to suppress it.
+//
+// Vector buffering:
+//   All frames are collected into a std::vector during capture.
+//   CSV is written at the end in one pass.
+//   This maximizes SPI throughput and gets closer to 20kHz sample rate.
 //
 // Run directory:
 //   /home/jz/trajectory-streamer/build
@@ -23,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits.h>
+#include <vector>
 
 #include <fcntl.h>
 #include <linux/spi/spidev.h>
@@ -37,17 +42,17 @@
 #define SYSID_FRAME_LEN  32
 
 #define DEFAULT_DEV      "/dev/spidev0.0"
-#define DEFAULT_SPEED_HZ 500000u
+#define DEFAULT_SPEED_HZ 4000000u        /* 4 MHz — maximizes throughput */
 
 #define DEFAULT_OUTDIR   "../drive_data"
 #define DEFAULT_OUTFILE  "../drive_data/sysid_log.csv"
 #define DEFAULT_PLOT_SCRIPT "../py-script/plot_sysid.py"
 
-#define CAPTURE_SECONDS  1.0
+#define CAPTURE_SECONDS  2.0
 
 /* GPIO assignments */
-#define CS_GPIO          25   /* PB12 on STM, active low */
-#define READY_REFILL_GPIO 7   /* PC13 on STM, active low */
+//#define CS_GPIO           25   /* PB12 on STM, active low */
+#define READY_REFILL_GPIO  7   /* PC13 on STM, active low */
 
 static volatile sig_atomic_t g_run = 1;
 
@@ -72,6 +77,13 @@ struct __attribute__((packed)) SysIdSample
 
 static_assert(sizeof(SysIdSample) == 32, "SysIdSample must be exactly 32 bytes");
 
+struct CapturedFrame
+{
+    double      host_time_s;
+    SysIdSample sample;
+    uint32_t    dt;
+};
+
 struct CaptureStats
 {
     uint32_t frames = 0;
@@ -84,6 +96,7 @@ struct CaptureStats
     uint32_t dt_count = 0;
     uint32_t zero_dt_count = 0;
     uint32_t big_dt_count = 0;
+    uint32_t torn_frames = 0;
 };
 
 static void sigint_handler(int sig)
@@ -167,10 +180,6 @@ static int spi_open_configure(const char *dev, uint32_t speed_hz)
     int fd = open(dev, O_RDWR);
     if (fd < 0) { std::perror("open SPI device"); return -1; }
 
-    /*
-     * SPI_NO_CS tells the kernel not to touch CE0/CE1 during transfers.
-     * CS is handled manually via GPIO25.
-     */
     uint8_t mode = SPI_MODE_1;
     uint8_t bits = 8;
 
@@ -198,20 +207,13 @@ static int spi_open_configure(const char *dev, uint32_t speed_hz)
     return fd;
 }
 
-/*
- * spi_read_frame — transfer one 32-byte frame.
- *
- * Asserts CS (GPIO25 low) before the transfer, deasserts after.
- * gpio_h is the lgpio handle opened in main().
- */
 static int spi_read_frame(int fd, uint32_t speed_hz,
                           uint8_t rx[SYSID_FRAME_LEN], int gpio_h)
 {
     uint8_t tx[SYSID_FRAME_LEN]{};
     std::memset(rx, 0, SYSID_FRAME_LEN);
 
-    /* Assert CS */
-    lgGpioWrite(gpio_h, CS_GPIO, 0);
+    //lgGpioWrite(gpio_h, CS_GPIO, 0);
 
     spi_ioc_transfer tr{};
     tr.tx_buf        = reinterpret_cast<unsigned long>(tx);
@@ -223,8 +225,7 @@ static int spi_read_frame(int fd, uint32_t speed_hz,
 
     int ret = ioctl(fd, SPI_IOC_MESSAGE(1), &tr);
 
-    /* Deassert CS */
-    lgGpioWrite(gpio_h, CS_GPIO, 1);
+   // lgGpioWrite(gpio_h, CS_GPIO, 1);
 
     if (ret < 1)
     {
@@ -233,18 +234,6 @@ static int spi_read_frame(int fd, uint32_t speed_hz,
     }
 
     return 0;
-}
-
-static FILE *open_output_file(const char *path)
-{
-    FILE *f = std::fopen(path, "w");
-    if (!f)
-    {
-        std::fprintf(stderr, "Failed to open output file: %s\n", path);
-        std::perror("fopen");
-        return nullptr;
-    }
-    return f;
 }
 
 static void write_csv_header(FILE *f)
@@ -317,6 +306,9 @@ static void print_summary(const CaptureStats *stats, double elapsed_s,
                 avg_dt, stats->max_dt);
     std::printf("dt == 0 count        : %u\n", stats->zero_dt_count);
     std::printf("dt > 100 count       : %u\n", stats->big_dt_count);
+    std::printf("Torn frames          : %u (%.1f%%)\n",
+    stats->torn_frames,
+    100.0 * stats->torn_frames / (stats->frames + stats->torn_frames));
 }
 
 static int run_plot_script(const char *csv_path)
@@ -362,6 +354,8 @@ static int run_plot_script(const char *csv_path)
     return 0;
 }
 
+
+
 int main(int argc, char **argv)
 {
     const char *dev   = DEFAULT_DEV;
@@ -376,9 +370,6 @@ int main(int argc, char **argv)
 
     if (mkdir_if_needed(DEFAULT_OUTDIR) != 0) return 1;
 
-    /*
-     * Open lgpio and configure CS_GPIO (GPIO25) as output, idle high.
-     */
     int gpio_h = lgGpiochipOpen(0);
     if (gpio_h < 0)
     {
@@ -386,31 +377,36 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (lgGpioClaimOutput(gpio_h, 0, CS_GPIO, 1) < 0)
-    {
-        std::fprintf(stderr, "lgGpioClaimOutput CS_GPIO failed\n");
-        lgGpiochipClose(gpio_h);
-        return 1;
-    }
+    // if (lgGpioClaimOutput(gpio_h, 0, CS_GPIO, 1) < 0)
+    // {
+    //     std::fprintf(stderr, "lgGpioClaimOutput CS_GPIO failed\n");
+    //     lgGpiochipClose(gpio_h);
+    //     return 1;
+    // }
 
     std::printf("SPI device  : %s\n", dev);
     std::printf("SPI speed   : %u Hz\n", speed_hz);
-    std::printf("CS GPIO     : %d\n", CS_GPIO);
+    //std::printf("CS GPIO     : %d\n", CS_GPIO);
     std::printf("Output      : %s\n", out_path);
     std::printf("Capture     : %.3f seconds\n", CAPTURE_SECONDS);
 
-    FILE *f = open_output_file(out_path);
-    if (!f) { lgGpiochipClose(gpio_h); return 1; }
-
     int fd = spi_open_configure(dev, speed_hz);
-    if (fd < 0) { std::fclose(f); lgGpiochipClose(gpio_h); return 1; }
+    if (fd < 0) { lgGpiochipClose(gpio_h); return 1; }
 
-    write_csv_header(f);
+    /*
+     * Reserve vector capacity upfront.
+     * At 20kHz for CAPTURE_SECONDS, worst case ~40k frames.
+     * Pre-allocate to avoid reallocation during capture.
+     */
+    std::vector<CapturedFrame> frames;
+    frames.reserve(static_cast<size_t>(CAPTURE_SECONDS * 25000.0));
 
     CaptureStats stats{};
-    uint32_t last_t    = 0;
-    bool have_last_t   = false;
-    const double t0    = monotonic_seconds();
+    uint32_t last_t  = 0;
+    bool have_last_t = false;
+    const double t0  = monotonic_seconds();
+
+    std::printf("Capturing...\n");
 
     while (g_run)
     {
@@ -424,29 +420,60 @@ int main(int argc, char **argv)
         if (spi_read_frame(fd, speed_hz, rx, gpio_h) < 0)
         {
             close(fd);
-            std::fclose(f);
             lgGpiochipClose(gpio_h);
             return 1;
         }
 
         SysIdSample s = decode_sysid_sample(rx);
 
+        if (s.ia_mA + s.ib_mA + s.ic_mA != 0)
+        {
+            stats.torn_frames++;
+            continue;
+        }   
+
         uint32_t dt = 0;
         if (have_last_t) dt = s.t - last_t;
         last_t       = s.t;
         have_last_t  = true;
 
-        write_csv_sample(f, elapsed, stats.frames, &s, dt);
+        CapturedFrame cf;
+        cf.host_time_s = elapsed;
+        cf.sample      = s;
+        cf.dt          = dt;
+        frames.push_back(cf);
+
         update_stats(&stats, &s, dt);
         stats.frames++;
     }
 
     const double elapsed_total = monotonic_seconds() - t0;
 
-    std::fflush(f);
-    std::fclose(f);
     close(fd);
     lgGpiochipClose(gpio_h);
+
+    std::printf("Capture complete. Writing %zu frames to CSV...\n", frames.size());
+
+    /*
+     * Write CSV after capture — no disk I/O during hot loop.
+     */
+    FILE *f = std::fopen(out_path, "w");
+    if (!f)
+    {
+        std::fprintf(stderr, "Failed to open output file: %s\n", out_path);
+        return 1;
+    }
+
+    write_csv_header(f);
+
+    for (uint32_t i = 0; i < static_cast<uint32_t>(frames.size()); i++)
+    {
+        write_csv_sample(f, frames[i].host_time_s, i,
+                         &frames[i].sample, frames[i].dt);
+    }
+
+    std::fflush(f);
+    std::fclose(f);
 
     print_summary(&stats, elapsed_total, out_path);
 
