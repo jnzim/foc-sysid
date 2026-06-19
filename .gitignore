@@ -6,5 +6,7 @@ build/
 .vscode/*.csv
 docs/*.csv
 docs/*.png
+/drive_data
+
 
 
