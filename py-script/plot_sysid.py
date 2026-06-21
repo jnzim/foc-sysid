@@ -16,6 +16,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
+import os
 
 ADC_A_OFFSET = 2084
 ADC_B_OFFSET = 2088
@@ -387,6 +388,38 @@ def main():
     plt.grid(True)
     plt.legend()
     save_plot(out_dir / "sysid_dt.png")
+    
+    
+    # Alignment phase analysis — R identification
+    align = df[(df['vd_mV'] == 3000) & (df['vq_mV'] == 0)]
+    if len(align) > 0:
+        ia_mean = align['ia_mA'].mean()
+        ib_mean = align['ib_mA'].mean()
+        v_align = 3000.0  # mV
+        # R = V/I, both in consistent units
+        r_est = v_align / ia_mean if ia_mean != 0 else float('inf')
+        print(f"\nAlignment phase R identification")
+        print(f"---------------------------------")
+        print(f"Samples in alignment     : {len(align)}")
+        print(f"ia mean                  : {ia_mean:.1f} mA")
+        print(f"ib mean                  : {ib_mean:.1f} mA")
+        print(f"Estimated R (V/ia_mean)  : {r_est:.2f} ohm")
+        
+    # Zoomed step response plot — first 50ms for L identification
+    align_early = df[df['host_time_s'] < 0.05]
+    if len(align_early) > 0:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(align_early['host_time_s'] * 1000, align_early['ia_mA'], label='ia_mA')
+        ax.plot(align_early['host_time_s'] * 1000, align_early['ib_mA'], label='ib_mA')
+        ax.set_xlabel('host_time_ms')
+        ax.set_ylabel('current (mA)')
+        ax.set_title('Step response — first 50ms (alignment phase)')
+        ax.legend()
+        ax.grid(True)
+        out = os.path.join(out_dir, 'sysid_step_response.png')
+        fig.savefig(out, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"wrote: {out}")
 
     print("")
     print("done")

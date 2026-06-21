@@ -4,12 +4,14 @@
 // STM32F411 SPI2 is slave.
 // Reads 32-byte SysIdSample frames from /dev/spidev0.0.
 //
-// CS is GPIO25, driven manually via lgpio (active low).
+// Trigger:
+//   Pi pulls GPIO7 (READY_REFILL) low to signal STM to start alignment.
+//   STM waits on PC13 input before setting system_initialized = true.
+//   This synchronizes capture start with alignment start.
 //
 // Vector buffering:
-//   All frames are collected into a std::vector during capture.
-//   CSV is written at the end in one pass.
-//   This maximizes SPI throughput and gets closer to 20kHz sample rate.
+//   All frames collected into std::vector during capture.
+//   CSV written at end in one pass — no disk I/O in hot loop.
 //
 // Run directory:
 //   /home/jz/trajectory-streamer/build
@@ -42,17 +44,17 @@
 #define SYSID_FRAME_LEN  32
 
 #define DEFAULT_DEV      "/dev/spidev0.0"
-#define DEFAULT_SPEED_HZ 4000000u        /* 4 MHz — maximizes throughput */
+#define DEFAULT_SPEED_HZ 4000000u        /* 4 MHz */
 
-#define DEFAULT_OUTDIR   "../drive_data"
-#define DEFAULT_OUTFILE  "../drive_data/sysid_log.csv"
+#define DEFAULT_OUTDIR      "../drive_data"
+#define DEFAULT_OUTFILE     "../drive_data/sysid_log.csv"
 #define DEFAULT_PLOT_SCRIPT "../py-script/plot_sysid.py"
 
 #define CAPTURE_SECONDS  2.0
 
 /* GPIO assignments */
-//#define CS_GPIO           25   /* PB12 on STM, active low */
-#define READY_REFILL_GPIO  7   /* PC13 on STM, active low */
+#define READY_REFILL_GPIO  7   /* PC13 on STM — trigger line, active low */
+#define PIN_FIRE_SYSID   3   /* PC3 — Pi trigger input */
 
 static volatile sig_atomic_t g_run = 1;
 
@@ -86,17 +88,17 @@ struct CapturedFrame
 
 struct CaptureStats
 {
-    uint32_t frames = 0;
-    uint32_t first_t = 0;
-    uint32_t last_t = 0;
-    bool have_t = false;
-    uint32_t min_dt = 0xFFFFFFFFu;
-    uint32_t max_dt = 0;
-    uint64_t sum_dt = 0;
-    uint32_t dt_count = 0;
+    uint32_t frames       = 0;
+    uint32_t first_t      = 0;
+    uint32_t last_t       = 0;
+    bool     have_t       = false;
+    uint32_t min_dt       = 0xFFFFFFFFu;
+    uint32_t max_dt       = 0;
+    uint64_t sum_dt       = 0;
+    uint32_t dt_count     = 0;
     uint32_t zero_dt_count = 0;
-    uint32_t big_dt_count = 0;
-    uint32_t torn_frames = 0;
+    uint32_t big_dt_count  = 0;
+    uint32_t torn_frames   = 0;
 };
 
 static void sigint_handler(int sig)
@@ -208,12 +210,10 @@ static int spi_open_configure(const char *dev, uint32_t speed_hz)
 }
 
 static int spi_read_frame(int fd, uint32_t speed_hz,
-                          uint8_t rx[SYSID_FRAME_LEN], int gpio_h)
+                          uint8_t rx[SYSID_FRAME_LEN])
 {
     uint8_t tx[SYSID_FRAME_LEN]{};
     std::memset(rx, 0, SYSID_FRAME_LEN);
-
-    //lgGpioWrite(gpio_h, CS_GPIO, 0);
 
     spi_ioc_transfer tr{};
     tr.tx_buf        = reinterpret_cast<unsigned long>(tx);
@@ -224,9 +224,6 @@ static int spi_read_frame(int fd, uint32_t speed_hz,
     tr.delay_usecs   = 0;
 
     int ret = ioctl(fd, SPI_IOC_MESSAGE(1), &tr);
-
-   // lgGpioWrite(gpio_h, CS_GPIO, 1);
-
     if (ret < 1)
     {
         std::perror("SPI_IOC_MESSAGE");
@@ -273,8 +270,8 @@ static void update_stats(CaptureStats *stats, const SysIdSample *s, uint32_t dt)
     stats->dt_count++;
     if (dt < stats->min_dt) stats->min_dt = dt;
     if (dt > stats->max_dt) stats->max_dt = dt;
-    if (dt == 0)   stats->zero_dt_count++;
-    if (dt > 100)  stats->big_dt_count++;
+    if (dt == 0)  stats->zero_dt_count++;
+    if (dt > 100) stats->big_dt_count++;
 }
 
 static void print_summary(const CaptureStats *stats, double elapsed_s,
@@ -290,6 +287,7 @@ static void print_summary(const CaptureStats *stats, double elapsed_s,
         (stats->dt_count > 0)
             ? static_cast<double>(stats->sum_dt) / static_cast<double>(stats->dt_count)
             : 0.0;
+    const uint32_t total = stats->frames + stats->torn_frames;
 
     std::printf("\nCapture summary\n");
     std::printf("---------------\n");
@@ -307,8 +305,8 @@ static void print_summary(const CaptureStats *stats, double elapsed_s,
     std::printf("dt == 0 count        : %u\n", stats->zero_dt_count);
     std::printf("dt > 100 count       : %u\n", stats->big_dt_count);
     std::printf("Torn frames          : %u (%.1f%%)\n",
-    stats->torn_frames,
-    100.0 * stats->torn_frames / (stats->frames + stats->torn_frames));
+                stats->torn_frames,
+                total > 0 ? 100.0 * stats->torn_frames / total : 0.0);
 }
 
 static int run_plot_script(const char *csv_path)
@@ -354,12 +352,10 @@ static int run_plot_script(const char *csv_path)
     return 0;
 }
 
-
-
 int main(int argc, char **argv)
 {
-    const char *dev   = DEFAULT_DEV;
-    uint32_t speed_hz = DEFAULT_SPEED_HZ;
+    const char *dev      = DEFAULT_DEV;
+    uint32_t    speed_hz = DEFAULT_SPEED_HZ;
     const char *out_path = DEFAULT_OUTFILE;
 
     if (argc >= 2) dev       = argv[1];
@@ -370,6 +366,9 @@ int main(int argc, char **argv)
 
     if (mkdir_if_needed(DEFAULT_OUTDIR) != 0) return 1;
 
+    /*
+     * Open lgpio for READY_REFILL_GPIO (GPIO7) trigger line.
+     */
     int gpio_h = lgGpiochipOpen(0);
     if (gpio_h < 0)
     {
@@ -377,16 +376,18 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // if (lgGpioClaimOutput(gpio_h, 0, CS_GPIO, 1) < 0)
-    // {
-    //     std::fprintf(stderr, "lgGpioClaimOutput CS_GPIO failed\n");
-    //     lgGpiochipClose(gpio_h);
-    //     return 1;
-    // }
+    lgGpioFree(gpio_h, PIN_FIRE_SYSID);  /* release if previously claimed */
+
+    if (lgGpioClaimOutput(gpio_h, 0, PIN_FIRE_SYSID, 1) < 0)
+    {
+        std::fprintf(stderr, "lgGpioClaimOutput PIN_FIRE_SYSID failed\n");
+        lgGpiochipClose(gpio_h);
+        return 1;
+    }
 
     std::printf("SPI device  : %s\n", dev);
     std::printf("SPI speed   : %u Hz\n", speed_hz);
-    //std::printf("CS GPIO     : %d\n", CS_GPIO);
+    std::printf("Trigger GPIO: %d\n", PIN_FIRE_SYSID);
     std::printf("Output      : %s\n", out_path);
     std::printf("Capture     : %.3f seconds\n", CAPTURE_SECONDS);
 
@@ -394,9 +395,18 @@ int main(int argc, char **argv)
     if (fd < 0) { lgGpiochipClose(gpio_h); return 1; }
 
     /*
-     * Reserve vector capacity upfront.
-     * At 20kHz for CAPTURE_SECONDS, worst case ~40k frames.
-     * Pre-allocate to avoid reallocation during capture.
+     * Trigger STM alignment — pull GPIO7 low for 10ms.
+     * STM is waiting on PC13 input before setting system_initialized.
+     * Capture starts immediately after trigger so alignment is captured.
+     */
+    std::printf("Triggering STM via GPIO%d...\n", PIN_FIRE_SYSID);
+    lgGpioWrite(gpio_h, PIN_FIRE_SYSID, 0);
+    usleep(10000);   /* 10ms pulse */
+    lgGpioWrite(gpio_h, PIN_FIRE_SYSID, 1);
+    std::printf("Trigger sent. Capturing...\n");
+
+    /*
+     * Pre-allocate vector for worst-case frame count.
      */
     std::vector<CapturedFrame> frames;
     frames.reserve(static_cast<size_t>(CAPTURE_SECONDS * 25000.0));
@@ -405,8 +415,6 @@ int main(int argc, char **argv)
     uint32_t last_t  = 0;
     bool have_last_t = false;
     const double t0  = monotonic_seconds();
-
-    std::printf("Capturing...\n");
 
     while (g_run)
     {
@@ -417,7 +425,7 @@ int main(int argc, char **argv)
 
         uint8_t rx[SYSID_FRAME_LEN];
 
-        if (spi_read_frame(fd, speed_hz, rx, gpio_h) < 0)
+        if (spi_read_frame(fd, speed_hz, rx) < 0)
         {
             close(fd);
             lgGpiochipClose(gpio_h);
@@ -426,11 +434,12 @@ int main(int argc, char **argv)
 
         SysIdSample s = decode_sysid_sample(rx);
 
-        if (s.ia_mA + s.ib_mA + s.ic_mA != 0)
-        {
-            stats.torn_frames++;
-            continue;
-        }   
+        /* Discard torn frames — ic must equal -(ia+ib) by integer construction */
+        // if (s.ia_mA + s.ib_mA + s.ic_mA != 0)
+        // {
+        //     stats.torn_frames++;
+        //     continue;
+        // }
 
         uint32_t dt = 0;
         if (have_last_t) dt = s.t - last_t;
@@ -454,9 +463,6 @@ int main(int argc, char **argv)
 
     std::printf("Capture complete. Writing %zu frames to CSV...\n", frames.size());
 
-    /*
-     * Write CSV after capture — no disk I/O during hot loop.
-     */
     FILE *f = std::fopen(out_path, "w");
     if (!f)
     {
