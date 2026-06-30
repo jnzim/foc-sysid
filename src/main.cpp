@@ -50,7 +50,7 @@
 #define DEFAULT_OUTFILE     "../drive_data/sysid_log.csv"
 #define DEFAULT_PLOT_SCRIPT "../py-script/plot_sysid.py"
 
-#define CAPTURE_SECONDS  2.0
+#define CAPTURE_SECONDS  20.0
 
 /* GPIO assignments */
 #define READY_REFILL_GPIO  7   /* PC13 on STM — trigger line, active low */

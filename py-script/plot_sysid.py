@@ -420,6 +420,24 @@ def main():
         fig.savefig(out, dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f"wrote: {out}")
+        
+        # Debug: time domain plot of adc_a and vd during sysid
+        sysid_df = df[df['host_time_s'] > 5.0].copy()
+        sysid_df['t_rel'] = sysid_df['host_time_s'] - sysid_df['host_time_s'].min()
+        mask = sysid_df['t_rel'] < 2.0
+
+        fig, ax = plt.subplots(figsize=(12, 4))
+        ax.plot(sysid_df['t_rel'][mask], sysid_df['adc_a'][mask] - 2091, label='adc_a - offset')
+        ax.plot(sysid_df['t_rel'][mask], sysid_df['adc_b'][mask] - 2091, label='adc_b - offset')
+        ax.plot(sysid_df['t_rel'][mask], sysid_df['vd_mV'][mask] / 100, label='vd_mV / 100')
+        ax2 = ax.twinx()
+        ax2.plot(sysid_df['t_rel'][mask], sysid_df['vd_mV'][mask], 'k--', alpha=0.3, label='vd_mV')
+        ax.set_xlabel('time (s)')
+        ax.set_ylabel('ADC counts / scaled vd')
+        ax.set_title('Sysid time domain — first 2s')
+        ax.legend()
+        ax.grid(True)
+        save_plot(out_dir / "sysid_time_domain.png")
 
     print("")
     print("done")
