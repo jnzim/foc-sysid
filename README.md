@@ -1,67 +1,53 @@
-# servo-trajectory-streamer
+# rpi-sysid
 
-Raspberry Pi side of a custom servo drive project. Generates trapezoidal motion profiles, streams trajectory samples to an STM32F411RE over SPI, collects telemetry, and plots results.
+Raspberry Pi data capture and frequency-domain analysis for a bare-metal STM32 FOC servo drive.
 
 Companion firmware: [stm32-servo-drive](https://github.com/jnzim/stm32-servo-drive)
 
-![Position tracking](docs/tracking.png)
-
-## Architecture
-
-```
-Pi 5 (C++) ──SPI 1 MHz──> STM32F411 ring buffer ──ISR──> servo loops ──PWM──> motor
-           <──READY (GPIO)──                <──32-byte telemetry──
-```
+![Current Plant Bode](docs/bode_plot.png)
 
 ## What it does
 
-- Computes trapezoidal velocity profiles (accel / cruise / decel) from mm inputs
-- Converts mm to encoder counts at the boundary — all internal math in counts
-- Streams 8-byte samples (int32 position + int32 velocity) to the STM32 over SPI at 1 kHz — proven at 5007 consecutive packets, 0 errors
-- Fills a 4096-sample ring buffer on the STM32, refills in 2048-sample blocks when READY asserts
-- Collects 32-byte telemetry frames back: position command, position feedback, velocity feedback, position error, q-axis current, q-axis voltage
-- Detects move complete via `samples_consumed` — no polling timeout
-- Logs `profile.csv` and `telem.csv` after each move
-- Auto-plots position tracking, velocity tracking, position error, current, and voltage via matplotlib
+- Captures 32-byte telemetry frames from STM32F411 over SPI at ~10kHz
+- Triggers STM32 sysid sequence via GPIO handshake
+- Logs timestamped CSV: encoder position, d/q currents, voltage commands, chirp frequency
+- Computes current loop plant Bode plot via Welch CSD estimation
+- Extracts R, L, fc from measured frequency response
+- Overlays confirmed plant model H(s) = 1/(Ls + R) with phase margin analysis
+
+## Current results — AKM11E motor
+
+| Parameter | Value | Method |
+|-----------|-------|--------|
+| R (line-to-line) | 3.55 Ω | Bode DC magnitude |
+| L | 2.47 mH | fc = 229Hz |
+| fc | 229 Hz | Bode -3dB point |
 
 ## Hardware
 
 - Raspberry Pi 5
-- STM32F411RE Nucleo-64 — bare metal, no HAL, no RTOS
-- SPI0 at 1 MHz, 25 µs inter-packet delay, manual CS via GPIO
-- PC13 READY signal from the STM32 — active low, triggers refill
-
-## Protocol
-
-- Block header (`0x03`) — starts trajectory block, sends sample count
-- Data packet (`0x04`) — 8-byte sample + XOR checksum, padded to 32 bytes for deterministic DMA buffer alignment
-- READY ACK (`0x05`) — Pi acknowledges PC13 assertion
-- Telemetry request (`0x06`) — STM32 replies with 32-byte TelemetryFrame on MISO
+- STM32F411RE Nucleo-64 (bare metal firmware)
+- SPI0 at 4 MHz
+- GPIO3 → STM PC3 trigger
 
 ## Build
 
 ```bash
 mkdir build && cd build
 cmake ..
-cmake --build . -j4
+make -j4
 ./drive
 ```
 
-## Plot
+## Analysis
 
 ```bash
-python3 py-script/plotprof.py docs/profile.csv docs/telem.csv
+python3 py-script/bode_plot.py drive_data/sysid_log.csv
 ```
 
-## Status
+## Roadmap
 
-- SPI streaming: proven — 5007 packets, 0 errors
-- Ring buffer + block refill: proven
-- Telemetry: 32-byte frame live; pos / vel / pos_err / i_q / v_q all logging
-- Velocity loop: active, plant responding
-- Position loop: next
-- Motor integration: encoder bring-up complete (Kollmorgen AKM11E, 8192-count RS-422 differential via AM26LS32 + hardware quadrature decode); FOC current loop next
-
-## Project goal
-
-Full-stack motion control from scratch: trajectory generation on Linux, a custom SPI streaming protocol, and a bare-metal FOC servo drive — every layer written and debugged at register level, no vendor frameworks.
+- [x] Current loop plant sysid — R, L confirmed
+- [ ] Closed current loop step response
+- [ ] Velocity loop plant sysid — J, B, Kt
+- [ ] Velocity loop closure

@@ -13,3 +13,7 @@ docs/*.png
 drive_data/
 *.png
 *.csv
+
+# in .gitignore
+*.png
+!docs/bode_plot.png
