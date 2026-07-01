@@ -11,3 +11,5 @@ docs/*.png
 
 
 drive_data/
+*.png
+*.csv

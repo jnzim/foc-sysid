@@ -40,7 +40,7 @@
 
 #define DEFAULT_OUTDIR      "../drive_data"
 #define DEFAULT_OUTFILE     "../drive_data/sysid_log.csv"
-#define DEFAULT_PLOT_SCRIPT "../py-script/plot_bode.py"
+#define DEFAULT_PLOT_SCRIPT "../py-script/bode_plot.py"
 
 #define CAPTURE_SECONDS  20.0
 
