@@ -5,22 +5,14 @@
 // Reads 32-byte SysIdSample frames from /dev/spidev0.0.
 //
 // Trigger:
-//   Pi pulls GPIO7 (READY_REFILL) low to signal STM to start alignment.
-//   STM waits on PC13 input before setting system_initialized = true.
-//   This synchronizes capture start with alignment start.
+//   Pi pulls GPIO3 (PC3 on STM) low to signal STM to start.
+//   STM waits on PC3 input before setting system_initialized = true.
 //
-// Vector buffering:
-//   All frames collected into std::vector during capture.
-//   CSV written at end in one pass — no disk I/O in hot loop.
-//
-// Run directory:
-//   /home/jz/trajectory-streamer/build
-//
-// CSV output:
-//   /home/jz/trajectory-streamer/drive_data/sysid_log.csv
-//
-// Plot script:
-//   /home/jz/trajectory-streamer/py-script/plot_sysid.py
+// CSV columns:
+//   host_time_s, frame, t, dt,
+//   enc_hi, enc_lo, sysid_f,
+//   id_mA, iq_mA, vd_mV, vq_mV, theta_mrad,
+//   ia_mA, ib_mA, adc_c, flags, crc, pad
 
 #include <cerrno>
 #include <csignal>
@@ -54,24 +46,24 @@
 
 /* GPIO assignments */
 #define READY_REFILL_GPIO  7   /* PC13 on STM — trigger line, active low */
-#define PIN_FIRE_SYSID   3   /* PC3 — Pi trigger input */
+#define PIN_FIRE_SYSID     3   /* PC3 — Pi trigger output */
 
 static volatile sig_atomic_t g_run = 1;
 
 struct __attribute__((packed)) SysIdSample
 {
     uint32_t t;
-    int16_t  ia_mA;
-    int16_t  ib_mA;
-    int16_t  ic_mA;
-    int16_t  id_mA;
-    int16_t  iq_mA;
-    int16_t  vd_mV;
-    int16_t  vq_mV;
-    int16_t  theta_mrad;
-    uint16_t adc_a;
-    uint16_t adc_b;
-    uint16_t adc_c;
+    int16_t  enc_hi;       /* encoder position high word */
+    int16_t  enc_lo;       /* encoder position low word  */
+    int16_t  sysid_f;      /* chirp frequency Hz         */
+    int16_t  id_mA;        /* d-axis current mA          */
+    int16_t  iq_mA;        /* q-axis current mA          */
+    int16_t  vd_mV;        /* d-axis voltage command mV  */
+    int16_t  vq_mV;        /* q-axis voltage command mV  */
+    int16_t  theta_mrad;   /* electrical angle mrad      */
+    int16_t  ia_mA;        /* phase A current mA         */
+    int16_t  ib_mA;        /* phase B current mA         */
+    uint16_t adc_c;        /* unused                     */
     uint16_t flags;
     uint16_t crc;
     uint16_t pad;
@@ -88,14 +80,14 @@ struct CapturedFrame
 
 struct CaptureStats
 {
-    uint32_t frames       = 0;
-    uint32_t first_t      = 0;
-    uint32_t last_t       = 0;
-    bool     have_t       = false;
-    uint32_t min_dt       = 0xFFFFFFFFu;
-    uint32_t max_dt       = 0;
-    uint64_t sum_dt       = 0;
-    uint32_t dt_count     = 0;
+    uint32_t frames        = 0;
+    uint32_t first_t       = 0;
+    uint32_t last_t        = 0;
+    bool     have_t        = false;
+    uint32_t min_dt        = 0xFFFFFFFFu;
+    uint32_t max_dt        = 0;
+    uint64_t sum_dt        = 0;
+    uint32_t dt_count      = 0;
     uint32_t zero_dt_count = 0;
     uint32_t big_dt_count  = 0;
     uint32_t torn_frames   = 0;
@@ -142,16 +134,16 @@ static SysIdSample decode_sysid_sample(const uint8_t rx[SYSID_FRAME_LEN])
 {
     SysIdSample s{};
     s.t          = get_u32_le(&rx[0]);
-    s.ia_mA      = get_s16_le(&rx[4]);
-    s.ib_mA      = get_s16_le(&rx[6]);
-    s.ic_mA      = get_s16_le(&rx[8]);
+    s.enc_hi     = get_s16_le(&rx[4]);
+    s.enc_lo     = get_s16_le(&rx[6]);
+    s.sysid_f    = get_s16_le(&rx[8]);
     s.id_mA      = get_s16_le(&rx[10]);
     s.iq_mA      = get_s16_le(&rx[12]);
     s.vd_mV      = get_s16_le(&rx[14]);
     s.vq_mV      = get_s16_le(&rx[16]);
     s.theta_mrad = get_s16_le(&rx[18]);
-    s.adc_a      = get_u16_le(&rx[20]);
-    s.adc_b      = get_u16_le(&rx[22]);
+    s.ia_mA      = get_s16_le(&rx[20]);
+    s.ib_mA      = get_s16_le(&rx[22]);
     s.adc_c      = get_u16_le(&rx[24]);
     s.flags      = get_u16_le(&rx[26]);
     s.crc        = get_u16_le(&rx[28]);
@@ -236,23 +228,24 @@ static int spi_read_frame(int fd, uint32_t speed_hz,
 static void write_csv_header(FILE *f)
 {
     std::fprintf(f,
-        "host_time_s,frame,t,dt,ia_mA,ib_mA,ic_mA,"
+        "host_time_s,frame,t,dt,"
+        "enc_hi,enc_lo,sysid_f,"
         "id_mA,iq_mA,vd_mV,vq_mV,theta_mrad,"
-        "adc_a,adc_b,adc_c,flags,crc,pad\n");
+        "ia_mA,ib_mA,adc_c,flags,crc,pad\n");
 }
 
 static void write_csv_sample(FILE *f, double host_time_s, uint32_t frame,
                              const SysIdSample *s, uint32_t dt)
 {
     std::fprintf(f,
-        "%.9f,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u,%u,0x%04X,%u,%u\n",
+        "%.9f,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,0x%04X,%u,%u\n",
         host_time_s, frame,
         s->t, dt,
-        s->ia_mA, s->ib_mA, s->ic_mA,
+        s->enc_hi, s->enc_lo, s->sysid_f,
         s->id_mA, s->iq_mA,
         s->vd_mV, s->vq_mV,
         s->theta_mrad,
-        s->adc_a, s->adc_b, s->adc_c,
+        s->ia_mA, s->ib_mA, s->adc_c,
         s->flags, s->crc, s->pad);
 }
 
@@ -366,9 +359,6 @@ int main(int argc, char **argv)
 
     if (mkdir_if_needed(DEFAULT_OUTDIR) != 0) return 1;
 
-    /*
-     * Open lgpio for READY_REFILL_GPIO (GPIO7) trigger line.
-     */
     int gpio_h = lgGpiochipOpen(0);
     if (gpio_h < 0)
     {
@@ -376,7 +366,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    lgGpioFree(gpio_h, PIN_FIRE_SYSID);  /* release if previously claimed */
+    lgGpioFree(gpio_h, PIN_FIRE_SYSID);
 
     if (lgGpioClaimOutput(gpio_h, 0, PIN_FIRE_SYSID, 1) < 0)
     {
@@ -394,20 +384,12 @@ int main(int argc, char **argv)
     int fd = spi_open_configure(dev, speed_hz);
     if (fd < 0) { lgGpiochipClose(gpio_h); return 1; }
 
-    /*
-     * Trigger STM alignment — pull GPIO7 low for 10ms.
-     * STM is waiting on PC13 input before setting system_initialized.
-     * Capture starts immediately after trigger so alignment is captured.
-     */
     std::printf("Triggering STM via GPIO%d...\n", PIN_FIRE_SYSID);
     lgGpioWrite(gpio_h, PIN_FIRE_SYSID, 0);
-    usleep(10000);   /* 10ms pulse */
+    usleep(10000);
     lgGpioWrite(gpio_h, PIN_FIRE_SYSID, 1);
     std::printf("Trigger sent. Capturing...\n");
 
-    /*
-     * Pre-allocate vector for worst-case frame count.
-     */
     std::vector<CapturedFrame> frames;
     frames.reserve(static_cast<size_t>(CAPTURE_SECONDS * 25000.0));
 
@@ -433,13 +415,6 @@ int main(int argc, char **argv)
         }
 
         SysIdSample s = decode_sysid_sample(rx);
-
-        /* Discard torn frames — ic must equal -(ia+ib) by integer construction */
-        // if (s.ia_mA + s.ib_mA + s.ic_mA != 0)
-        // {
-        //     stats.torn_frames++;
-        //     continue;
-        // }
 
         uint32_t dt = 0;
         if (have_last_t) dt = s.t - last_t;
