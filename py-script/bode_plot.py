@@ -127,10 +127,8 @@ df = df[df["vd_mV"].abs() < 1500]
 t  = df["host_time_s"].values - df["host_time_s"].min()
 vd = df["vd_mV"].values / 1000.0
 
-# SIGN FIX:
-# Your measured id was inverted relative to applied vd.
-# Without this, low-frequency phase appears near +180 deg.
-id_ = -df["id_mA"].values / 1000.0
+
+id_ = df["id_mA"].values / 1000.0
 
 fs = 1.0 / np.mean(np.diff(t))
 
