@@ -32,13 +32,20 @@ from scipy.signal import csd, welch, coherence
 # -----------------------------------------------------------------------------
 
 # Nominal motor parameters
-R_NOM = 3.3        # ohm
-L_NOM = 0.00204    # H
+R_LL = 3.10
+L_LL = 0.00204
 
-# Confirmed from Bode measurement
-R_MEAS  = 3.55     # ohm
-FC_MEAS = 229.0    # Hz
-L_MEAS  = R_MEAS / (2.0 * np.pi * FC_MEAS)
+R_NOM = R_LL / 2.0       # 1.55 ohm
+L_NOM = L_LL / 2.0       # 1.02 mH
+
+
+# Confirmed line-line values
+R_MEAS_LL = 3.55
+FC_MEAS = 229.0
+
+# dq/phase plant values
+R_MEAS = R_MEAS_LL / 2.0
+L_MEAS = R_MEAS / (2.0 * np.pi * FC_MEAS)
 
 # Optional plant measurement delay overlay
 TD_PLANT = 25e-6   # seconds; try 0, 10e-6, 25e-6, 50e-6
@@ -56,8 +63,8 @@ TD_PLANT = 25e-6   # seconds; try 0, 10e-6, 25e-6, 50e-6
 # Loop gain:
 #   L(s) = (Kp + Ki/s) * 1/(Ls + R)
 
-KP_I = 1.0       # V/A      <-- replace with real current-loop Kp
-KI_I = 500.0     # V/(A*s)  <-- replace with real current-loop Ki
+KP_I = 7.78       # V/A      <-- replace with real current-loop Kp
+KI_I = 11153.0     # V/(A*s)  <-- replace with real current-loop Ki
 
 # Optional digital/control/PWM/ADC delay in loop margin estimate
 TD_LOOP = 25e-6  # seconds

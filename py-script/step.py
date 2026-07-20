@@ -7,6 +7,7 @@ Usage:
 """
 
 import sys
+from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -15,7 +16,8 @@ if len(sys.argv) != 2:
     print("Usage: python3 step.py <csv_file>")
     sys.exit(1)
 
-df = pd.read_csv(sys.argv[1])
+csv_path = Path(sys.argv[1])
+df = pd.read_csv(csv_path)
 
 required = ["iq_mA", "vq_mV", "vd_mV", "ia_mA", "ib_mA"]
 missing = [name for name in required if name not in df.columns]
@@ -98,6 +100,8 @@ ax2.grid(True, alpha=0.3)
 for ax in (ax0, ax1, ax2):
     ax.set_xlim(PLOT_START, PLOT_END)
 
-plt.savefig("step_response.png", dpi=150, bbox_inches="tight")
-print("Saved step_response.png")
+# Save to drive_data directory.
+out_path = Path("drive_data") / "step_response.png"
+plt.savefig(out_path, dpi=150, bbox_inches="tight")
+print(f"Saved {out_path}")
 plt.show()

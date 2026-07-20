@@ -34,7 +34,9 @@
 #define DEFAULT_OUTDIR      "../drive_data"
 #define DEFAULT_OUTFILE     "../drive_data/sysid_log.csv"
 #define DEFAULT_PLOT_SCRIPT "../py-script/bode_plot.py"
-#define CAPTURE_SECONDS     20.0
+#define CAPTURE_TIMEOUT_SECONDS  120.0
+#define SYSID_STAGE_RUN          1u
+#define SYSID_STAGE_IDLE         2u
 #define PIN_FIRE_SYSID      3    // Pi GPIO3 → STM PC3, active-low trigger
 
 static volatile sig_atomic_t g_run = 1;
@@ -52,13 +54,13 @@ struct __attribute__((packed)) SysIdSample
     int16_t  theta_mrad;
     int16_t  ia_mA;
     int16_t  ib_mA;
-    uint16_t adc_c;
+    int16_t  iq_cmd_mA;
     uint16_t flags;
     uint16_t crc;
     uint16_t pad;
 };
 
-static_assert(sizeof(SysIdSample) == 32, "SysIdSample must be exactly 32 bytes");
+static_assert(sizeof(SysIdSample) == 32);
 
 struct CapturedFrame
 {
@@ -129,7 +131,7 @@ static SysIdSample decode_sysid_sample(const uint8_t rx[SYSID_FRAME_LEN])
     s.theta_mrad = get_s16_le(&rx[18]);
     s.ia_mA      = get_s16_le(&rx[20]);
     s.ib_mA      = get_s16_le(&rx[22]);
-    s.adc_c      = get_u16_le(&rx[24]);
+    s.iq_cmd_mA  = get_s16_le(&rx[24]);
     s.flags      = get_u16_le(&rx[26]);
     s.crc        = get_u16_le(&rx[28]);
     s.pad        = get_u16_le(&rx[30]);
@@ -194,27 +196,57 @@ static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[SYSID_FRAME_LEN]
     return 0;
 }
 
+// static void write_csv_header(FILE *f)
+// {
+//     std::fprintf(f,
+//         "host_time_s,frame,t,dt,"
+//         "enc_hi,enc_lo,sysid_f,"
+//         "id_mA,iq_mA,vd_mV,vq_mV,theta_mrad,"
+//         "ia_mA,ib_mA,adc_c,flags,crc,pad\n");
+// }
+
 static void write_csv_header(FILE *f)
 {
-    std::fprintf(f,
-        "host_time_s,frame,t,dt,"
-        "enc_hi,enc_lo,sysid_f,"
-        "id_mA,iq_mA,vd_mV,vq_mV,theta_mrad,"
-        "ia_mA,ib_mA,adc_c,flags,crc,pad\n");
+    std::fprintf(
+        f,
+        "host_time_s,frame,t,dt,encoder_position,"
+        "sysid_f,id_mA,iq_mA,vd_mV,vq_mV,theta_mrad,"
+        "ia_mA,ib_mA,iq_cmd_mA,flags,crc,pad\n"
+    );
 }
-
 static void write_csv_sample(FILE *f, double host_time_s, uint32_t frame,
                              const SysIdSample *s, uint32_t dt)
 {
-    std::fprintf(f,
-        "%.9f,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,0x%04X,%u,%u\n",
-        host_time_s, frame,
-        s->t, dt,
-        s->enc_hi, s->enc_lo, s->sysid_f,
-        s->id_mA, s->iq_mA,
-        s->vd_mV, s->vq_mV, s->theta_mrad,
-        s->ia_mA, s->ib_mA, s->adc_c,
-        s->flags, s->crc, s->pad);
+    const uint32_t encoder_bits =
+        (static_cast<uint32_t>(static_cast<uint16_t>(s->enc_hi)) << 16) |
+         static_cast<uint32_t>(static_cast<uint16_t>(s->enc_lo));
+
+    const int32_t encoder_position =
+        static_cast<int32_t>(encoder_bits);
+
+    std::fprintf(
+        f,
+        "%.9f,%u,%u,%u,"
+        "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+        "0x%04X,%u,%u\n",
+        host_time_s,
+        frame,
+        s->t,
+        dt,
+        encoder_position,
+        static_cast<int>(s->sysid_f),
+        static_cast<int>(s->id_mA),
+        static_cast<int>(s->iq_mA),
+        static_cast<int>(s->vd_mV),
+        static_cast<int>(s->vq_mV),
+        static_cast<int>(s->theta_mrad),
+        static_cast<int>(s->ia_mA),
+        static_cast<int>(s->ib_mA),
+        static_cast<int>(s->iq_cmd_mA),
+        static_cast<unsigned>(s->flags),
+        static_cast<unsigned>(s->crc),
+        static_cast<unsigned>(s->pad)
+    );
 }
 
 static void update_stats(CaptureStats *stats, const SysIdSample *s, uint32_t dt)
@@ -315,7 +347,7 @@ int main(int argc, char **argv)
     std::printf("device  : %s\n",   dev);
     std::printf("speed   : %u Hz\n", speed_hz);
     std::printf("output  : %s\n",   out_path);
-    std::printf("capture : %.1f s\n", CAPTURE_SECONDS);
+    std::printf("timeout : %.1f s\n", CAPTURE_TIMEOUT_SECONDS);
 
     int fd = spi_open_configure(dev, speed_hz);
     if (fd < 0) { lgGpiochipClose(gpio_h); return 1; }
@@ -327,16 +359,24 @@ int main(int argc, char **argv)
     std::printf("trigger sent, capturing...\n");
 
     std::vector<CapturedFrame> frames;
-    frames.reserve(static_cast<size_t>(CAPTURE_SECONDS * 25000.0));
+    frames.reserve(static_cast<size_t>(CAPTURE_TIMEOUT_SECONDS * 12000.0));
 
     CaptureStats stats{};
     uint32_t last_t    = 0;
     bool     have_last = false;
+    bool     saw_run   = false;
     const double t0    = monotonic_seconds();
 
     while (g_run)
     {
-        if (monotonic_seconds() - t0 >= CAPTURE_SECONDS) break;
+        const double elapsed_now = monotonic_seconds() - t0;
+
+        if (elapsed_now >= CAPTURE_TIMEOUT_SECONDS)
+        {
+            std::fprintf(stderr,
+                         "capture timeout reached before SYSID completed\n");
+            break;
+        }
 
         uint8_t rx[SYSID_FRAME_LEN];
         if (spi_read_frame(fd, speed_hz, rx) < 0)
@@ -352,9 +392,20 @@ int main(int argc, char **argv)
         last_t      = s.t;
         have_last   = true;
 
-        frames.push_back({monotonic_seconds() - t0, s, dt});
+        frames.push_back({elapsed_now, s, dt});
         update_stats(&stats, &s, dt);
         stats.frames++;
+
+        const uint16_t stage = s.flags & 0x0003u;
+
+        if (stage == SYSID_STAGE_RUN)
+            saw_run = true;
+
+        if (saw_run && stage == SYSID_STAGE_IDLE)
+        {
+            std::printf("SYSID complete, stopping capture.\n");
+            break;
+        }
     }
 
     const double elapsed = monotonic_seconds() - t0;
