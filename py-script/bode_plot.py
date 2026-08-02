@@ -25,46 +25,37 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from scipy.signal import csd, welch, coherence
+from scipy.optimize import curve_fit
 
 
 # -----------------------------------------------------------------------------
 # Motor / plant parameters
 # -----------------------------------------------------------------------------
 
-# Nominal motor parameters
+# Nominal motor parameters (datasheet/reference, plotted for comparison only —
+# R_MEAS/L_MEAS/FC_MEAS below are fit from this run's own data, not hardcoded)
 R_LL = 3.10
 L_LL = 0.00204
 
 R_NOM = R_LL / 2.0       # 1.55 ohm
 L_NOM = L_LL / 2.0       # 1.02 mH
 
-
-# Confirmed line-line values
-R_MEAS_LL = 3.55
-FC_MEAS = 229.0
-
-# dq/phase plant values
-R_MEAS = R_MEAS_LL / 2.0
-L_MEAS = R_MEAS / (2.0 * np.pi * FC_MEAS)
-
 # Optional plant measurement delay overlay
 TD_PLANT = 25e-6   # seconds; try 0, 10e-6, 25e-6, 50e-6
 
 
 # -----------------------------------------------------------------------------
-# Current-loop controller for margin analysis
+# Current-loop controller design target
 # -----------------------------------------------------------------------------
-# Replace these with your actual firmware current-loop gains.
+# PI zero is placed at the fitted plant pole (cancellation), Kp is then solved
+# so the resulting pure-integrator loop crosses 0 dB at BW_TARGET_HZ — same
+# zero-cancellation + BW-target approach as bode_vel_plot.py.
 #
-# Units:
-#   KP_I = V/A
-#   KI_I = V/(A*s)
-#
-# Loop gain:
-#   L(s) = (Kp + Ki/s) * 1/(Ls + R)
+# 500 Hz matches the CURRENT_LOOP_BW_HZ that bode_vel_plot.py *assumes* when
+# it derives the velocity loop's own BW target (current/10) — running this
+# fit tells you whether that assumption actually holds for this hardware.
 
-KP_I = 7.78       # V/A      <-- replace with real current-loop Kp
-KI_I = 11153.0     # V/(A*s)  <-- replace with real current-loop Ki
+BW_TARGET_HZ = 500.0  # V/A and V/(A*s) gains (KP_I, KI_I) are derived below
 
 # Optional digital/control/PWM/ADC delay in loop margin estimate
 TD_LOOP = 25e-6  # seconds
@@ -73,6 +64,12 @@ TD_LOOP = 25e-6  # seconds
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+
+def first_order_complex(f, K, tau):
+    w = 2.0 * np.pi * f
+    H = K / (1j * w * tau + 1.0)
+    return np.concatenate([H.real, H.imag])
+
 
 def interp_log_x_for_y(x_hz, y, target):
     """
@@ -145,12 +142,6 @@ print(f"id      : {id_.min()*1000:.1f} to {id_.max()*1000:.1f} mA")
 print(f"freq    : {df['sysid_f'].min():.1f} to {df['sysid_f'].max():.1f} Hz")
 print(f"corr    : {np.corrcoef(vd, id_)[0,1]:.4f}")
 
-print("\nConfirmed plant parameters:")
-print("  P(s)  = 1 / (Ls + R)")
-print(f"  R     = {R_MEAS:.2f} ohm")
-print(f"  L     = {L_MEAS*1000:.2f} mH")
-print(f"  fc    = {FC_MEAS:.0f} Hz")
-
 # Remove DC bias before spectral estimate
 vd_ac = vd - np.mean(vd)
 id_ac = id_ - np.mean(id_)
@@ -181,6 +172,52 @@ band = (
 
 coh_good   = band & (Cxy >= 0.5)
 coh_strong = band & (Cxy >= 0.8)
+
+
+# -----------------------------------------------------------------------------
+# Plant identification — first-order fit P(s) = id/vd = 1/(Ls + R)
+#                       = K/(tau*s + 1), K = 1/R, tau = L/R
+# -----------------------------------------------------------------------------
+
+f_fit = f_csd[coh_good]
+H_fit = P_meas[coh_good]
+
+if len(f_fit) < 5:
+    raise RuntimeError("Too few coherent (coh>=0.5) frequency bins to fit the plant")
+
+y_fit = np.concatenate([H_fit.real, H_fit.imag])
+
+K0   = float(np.abs(H_fit[np.argmin(f_fit)]))
+tau0 = 1.0 / (2.0 * np.pi * 200.0)
+
+popt, _ = curve_fit(first_order_complex, f_fit, y_fit, p0=[K0, tau0], maxfev=20_000)
+K_fit, tau_fit = popt
+tau_fit = abs(tau_fit)
+
+R_MEAS  = 1.0 / K_fit
+L_MEAS  = tau_fit * R_MEAS
+FC_MEAS = 1.0 / (2.0 * np.pi * tau_fit)
+
+print("\nFitted plant parameters (this run's data, coh>=0.5 bins):")
+print("  P(s)  = 1 / (Ls + R)")
+print(f"  R     = {R_MEAS:.2f} ohm")
+print(f"  L     = {L_MEAS*1000:.2f} mH")
+print(f"  fc    = {FC_MEAS:.0f} Hz")
+
+# -----------------------------------------------------------------------------
+# Current-loop PI design — zero at fitted plant pole, gain set for BW_TARGET_HZ
+# -----------------------------------------------------------------------------
+
+wc_target = 2.0 * np.pi * BW_TARGET_HZ
+TI_I      = tau_fit
+KP_I      = wc_target * TI_I / K_fit
+KI_I      = KP_I / TI_I
+
+print("\nDesigned current-loop PI (zero-cancellation @ fitted pole):")
+print(f"  BW target = {BW_TARGET_HZ:.0f} Hz")
+print(f"  Ti        = tau_fit = {TI_I*1000:.3f} ms")
+print(f"  Kp        = {KP_I:.4g} V/A")
+print(f"  Ki        = {KI_I:.4g} V/(A*s)")
 
 
 # -----------------------------------------------------------------------------
@@ -313,7 +350,7 @@ ax1.semilogx(
     f_th,
     mag_conf,
     "g-",
-    label=f"Confirmed R={R_MEAS:.2f}Ω L={L_MEAS*1000:.2f}mH fc={FC_MEAS:.0f}Hz"
+    label=f"Fitted R={R_MEAS:.2f}Ω L={L_MEAS*1000:.2f}mH fc={FC_MEAS:.0f}Hz"
 )
 
 ax1.axhline(
@@ -394,7 +431,7 @@ ax2.semilogx(
     f_th,
     phi_conf,
     "g-",
-    label="Confirmed"
+    label="Fitted"
 )
 
 if TD_PLANT > 0:
@@ -402,7 +439,7 @@ if TD_PLANT > 0:
         f_th,
         phi_conf_delay,
         "k--",
-        label=f"Confirmed + {TD_PLANT*1e6:.0f} us delay"
+        label=f"Fitted + {TD_PLANT*1e6:.0f} us delay"
     )
 
 ax2.axvline(

@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <limits.h>
 #include <vector>
 
@@ -31,13 +32,24 @@
 #define SYSID_FRAME_LEN     32
 #define DEFAULT_DEV         "/dev/spidev0.0"
 #define DEFAULT_SPEED_HZ    4000000u
-#define DEFAULT_OUTDIR      "../drive_data"
-#define DEFAULT_OUTFILE     "../drive_data/sysid_log.csv"
-#define DEFAULT_PLOT_SCRIPT "../py-script/bode_plot.py"
+// "latest" is overwritten every run — no digging through old plots to find
+// the one from the test you just ran. Move out anything you want to keep.
+#define DEFAULT_OUTDIR      "../drive_data/latest"
+#define DEFAULT_OUTFILE     "../drive_data/latest/sysid_log.csv"
 #define CAPTURE_TIMEOUT_SECONDS  120.0
 #define SYSID_STAGE_RUN          1u
 #define SYSID_STAGE_IDLE         2u
 #define PIN_FIRE_SYSID      3    // Pi GPIO3 → STM PC3, active-low trigger
+
+// Mirrors Include/config.h SYSID_TEST_* values on the STM32 side.
+// The firmware stamps its compile-time SYSID_TEST into SysIdSample.pad
+// (see spi_sysid_update_latest() in src/spi.c) so this side always knows
+// which test actually ran, instead of guessing which script to run.
+#define SYSID_TEST_CURRENT_LOOP_CHIRP  0u
+#define SYSID_TEST_CURRENT_LOOP_STEP   1u
+#define SYSID_TEST_VEL_CHIRP           2u
+#define SYSID_TEST_CL_VEL_STEP         4u
+#define SYSID_TEST_RIPPLE_DEBUG        5u
 
 static volatile sig_atomic_t g_run = 1;
 
@@ -293,30 +305,116 @@ static void print_summary(const CaptureStats *stats, double elapsed_s,
                 total > 0 ? 100.0 * stats->torn_frames / total : 0.0);
 }
 
-static int run_plot_script(const char *csv_path)
+// Which analysis script(s) to run for a given SYSID_TEST, read back from
+// SysIdSample.pad. Some tests have a companion time-domain plot alongside
+// the primary Bode/step analysis.
+static std::vector<const char *> plot_scripts_for_test(uint16_t test_id)
 {
-    const char *script = DEFAULT_PLOT_SCRIPT;
+    switch (test_id)
+    {
+        case SYSID_TEST_CURRENT_LOOP_CHIRP:
+            return { "../py-script/bode_plot.py" };
+        case SYSID_TEST_CURRENT_LOOP_STEP:
+            return { "../py-script/step.py" };
+        case SYSID_TEST_VEL_CHIRP:
+            return { "../py-script/bode_vel_plot.py", "../py-script/vel_v_t.py" };
+        case SYSID_TEST_CL_VEL_STEP:
+            return { "../py-script/velocity_step_plot.py" };
+        case SYSID_TEST_RIPPLE_DEBUG:
+            return { "../py-script/ripple_debug_plot.py" };
+        default:
+            return {};
+    }
+}
+
+static int run_plot_scripts(const char *csv_path, uint16_t test_id)
+{
     char cwd[PATH_MAX];
 
     std::printf("\nPlot setup\n----------\n");
-    if (getcwd(cwd, sizeof(cwd))) std::printf("cwd    : %s\n", cwd);
-    std::printf("csv    : %s\n", csv_path);
-    std::printf("script : %s\n", script);
+    if (getcwd(cwd, sizeof(cwd))) std::printf("cwd     : %s\n", cwd);
+    std::printf("csv     : %s\n", csv_path);
+    std::printf("test_id : %u\n", test_id);
 
     if (access(csv_path, R_OK) != 0) { std::perror("csv not readable"); return -1; }
-    if (access(script,   R_OK) != 0) { std::perror("script not readable"); return -1; }
 
-    char cmd[1024];
-    std::snprintf(cmd, sizeof(cmd), "python3 -u \"%s\" \"%s\"", script, csv_path);
-    std::printf("\n%s\n", cmd);
-
-    int ret = std::system(cmd);
-    if (ret != 0)
+    std::vector<const char *> scripts = plot_scripts_for_test(test_id);
+    if (scripts.empty())
     {
-        std::fprintf(stderr, "bode_plot.py exited with code %d\n", ret);
+        std::fprintf(stderr,
+                      "no analysis script mapped for SYSID_TEST=%u — run one manually\n",
+                      test_id);
         return -1;
     }
-    return 0;
+
+    int rc = 0;
+    for (const char *script : scripts)
+    {
+        std::printf("script  : %s\n", script);
+
+        if (access(script, R_OK) != 0)
+        {
+            std::perror("script not readable");
+            rc = -1;
+            continue;
+        }
+
+        char cmd[1024];
+        std::snprintf(cmd, sizeof(cmd), "python3 -u \"%s\" \"%s\"", script, csv_path);
+        std::printf("\n%s\n", cmd);
+
+        int ret = std::system(cmd);
+        if (ret != 0)
+        {
+            std::fprintf(stderr, "%s exited with code %d\n", script, ret);
+            rc = -1;
+        }
+    }
+    return rc;
+}
+
+// Pops open every .png in `dir` newer than `since` on the Pi's local
+// monitor (DISPLAY=:0 — the physically attached display, not this SSH
+// session). Best-effort: failures are logged, never fatal.
+static void open_new_plots(const char *dir, time_t since)
+{
+    DIR *d = opendir(dir);
+    if (!d) { std::perror("opendir plot dir"); return; }
+
+    struct dirent *entry;
+    while ((entry = readdir(d)) != nullptr)
+    {
+        const char *name = entry->d_name;
+        size_t      len  = std::strlen(name);
+        if (len < 4 || std::strcmp(name + len - 4, ".png") != 0)
+            continue;
+
+        char path[PATH_MAX];
+        std::snprintf(path, sizeof(path), "%s/%s", dir, name);
+
+        struct stat st{};
+        if (stat(path, &st) != 0 || st.st_mtime < since)
+            continue;
+
+        std::printf("opening : %s\n", path);
+
+        char cmd[PATH_MAX + 64];
+        std::snprintf(cmd, sizeof(cmd),
+                      "DISPLAY=:0 xdg-open \"%s\" >/dev/null 2>&1 &", path);
+        std::system(cmd);
+    }
+    closedir(d);
+}
+
+// Blocks on a line of stdin. Returns false on EOF/Ctrl-D (or a signal
+// interrupting the read), which the caller treats as "stop looping".
+static bool wait_for_enter(const char *prompt)
+{
+    std::printf("\n%s", prompt);
+    std::fflush(stdout);
+
+    char line[64];
+    return std::fgets(line, sizeof(line), stdin) != nullptr;
 }
 
 int main(int argc, char **argv)
@@ -352,79 +450,128 @@ int main(int argc, char **argv)
     int fd = spi_open_configure(dev, speed_hz);
     if (fd < 0) { lgGpiochipClose(gpio_h); return 1; }
 
-    // Trigger STM — 10ms active-low pulse on PIN_FIRE_SYSID
-    lgGpioWrite(gpio_h, PIN_FIRE_SYSID, 0);
-    usleep(10000);
-    lgGpioWrite(gpio_h, PIN_FIRE_SYSID, 1);
-    std::printf("trigger sent, capturing...\n");
+    int exit_code = 0;
 
-    std::vector<CapturedFrame> frames;
-    frames.reserve(static_cast<size_t>(CAPTURE_TIMEOUT_SECONDS * 12000.0));
-
-    CaptureStats stats{};
-    uint32_t last_t    = 0;
-    bool     have_last = false;
-    bool     saw_run   = false;
-    const double t0    = monotonic_seconds();
-
+    // Re-arms after every capture instead of exiting — flash/reset the STM
+    // for the next test, then hit Enter here when it's booted and ready.
     while (g_run)
     {
-        const double elapsed_now = monotonic_seconds() - t0;
+        if (!wait_for_enter("Press Enter once the STM is flashed and ready "
+                            "for the next test (Ctrl+C to exit): "))
+            break;
 
-        if (elapsed_now >= CAPTURE_TIMEOUT_SECONDS)
+        if (!g_run) break;
+
+        // Trigger STM — 10ms active-low pulse on PIN_FIRE_SYSID
+        lgGpioWrite(gpio_h, PIN_FIRE_SYSID, 0);
+        usleep(10000);
+        lgGpioWrite(gpio_h, PIN_FIRE_SYSID, 1);
+        std::printf("trigger sent, capturing...\n");
+
+        std::vector<CapturedFrame> frames;
+        frames.reserve(static_cast<size_t>(CAPTURE_TIMEOUT_SECONDS * 12000.0));
+
+        CaptureStats stats{};
+        uint32_t last_t    = 0;
+        bool     have_last = false;
+        bool     saw_run   = false;
+        bool     read_error = false;
+        const double t0    = monotonic_seconds();
+
+        while (g_run)
         {
-            std::fprintf(stderr,
-                         "capture timeout reached before SYSID completed\n");
+            const double elapsed_now = monotonic_seconds() - t0;
+
+            if (elapsed_now >= CAPTURE_TIMEOUT_SECONDS)
+            {
+                std::fprintf(stderr,
+                             "capture timeout reached before SYSID completed\n");
+                break;
+            }
+
+            uint8_t rx[SYSID_FRAME_LEN];
+            if (spi_read_frame(fd, speed_hz, rx) < 0)
+            {
+                read_error = true;
+                break;
+            }
+
+            SysIdSample s = decode_sysid_sample(rx);
+
+            uint32_t dt = have_last ? (s.t - last_t) : 0;
+            last_t      = s.t;
+            have_last   = true;
+
+            frames.push_back({elapsed_now, s, dt});
+            update_stats(&stats, &s, dt);
+            stats.frames++;
+
+            const uint16_t stage = s.flags & 0x0003u;
+
+            if (stage == SYSID_STAGE_RUN)
+                saw_run = true;
+
+            if (saw_run && stage == SYSID_STAGE_IDLE)
+            {
+                std::printf("SYSID complete, stopping capture.\n");
+                break;
+            }
+        }
+
+        if (read_error)
+        {
+            std::fprintf(stderr, "SPI read failed, aborting.\n");
+            exit_code = 1;
             break;
         }
 
-        uint8_t rx[SYSID_FRAME_LEN];
-        if (spi_read_frame(fd, speed_hz, rx) < 0)
+        const double elapsed = monotonic_seconds() - t0;
+
+        std::printf("captured %zu frames, writing CSV...\n", frames.size());
+
+        FILE *f = std::fopen(out_path, "w");
+        if (!f)
         {
-            close(fd);
-            lgGpiochipClose(gpio_h);
-            return 1;
-        }
-
-        SysIdSample s = decode_sysid_sample(rx);
-
-        uint32_t dt = have_last ? (s.t - last_t) : 0;
-        last_t      = s.t;
-        have_last   = true;
-
-        frames.push_back({elapsed_now, s, dt});
-        update_stats(&stats, &s, dt);
-        stats.frames++;
-
-        const uint16_t stage = s.flags & 0x0003u;
-
-        if (stage == SYSID_STAGE_RUN)
-            saw_run = true;
-
-        if (saw_run && stage == SYSID_STAGE_IDLE)
-        {
-            std::printf("SYSID complete, stopping capture.\n");
+            std::perror("fopen");
+            exit_code = 1;
             break;
         }
+
+        write_csv_header(f);
+        for (uint32_t i = 0; i < (uint32_t)frames.size(); i++)
+            write_csv_sample(f, frames[i].host_time_s, i, &frames[i].sample, frames[i].dt);
+
+        std::fflush(f);
+        std::fclose(f);
+
+        print_summary(&stats, elapsed, out_path);
+
+        // pad carries the STM32's compile-time SYSID_TEST value (same on every
+        // frame) — pull it from the first RUN-stage frame so a stray boot/idle
+        // frame at the front of the capture can't throw it off.
+        uint16_t test_id = 0;
+        bool     have_test_id = false;
+        for (const CapturedFrame &cf : frames)
+        {
+            if ((cf.sample.flags & 0x0003u) == SYSID_STAGE_RUN)
+            {
+                test_id      = cf.sample.pad;
+                have_test_id = true;
+                break;
+            }
+        }
+        if (!have_test_id && !frames.empty())
+            test_id = frames.back().sample.pad;
+
+        // A failed plot doesn't end the session — you may still want to
+        // reflash and try the next test.
+        const time_t plot_start = time(nullptr);
+        run_plot_scripts(out_path, test_id);
+        open_new_plots(DEFAULT_OUTDIR, plot_start);
     }
 
-    const double elapsed = monotonic_seconds() - t0;
     close(fd);
     lgGpiochipClose(gpio_h);
-
-    std::printf("captured %zu frames, writing CSV...\n", frames.size());
-
-    FILE *f = std::fopen(out_path, "w");
-    if (!f) { std::perror("fopen"); return 1; }
-
-    write_csv_header(f);
-    for (uint32_t i = 0; i < (uint32_t)frames.size(); i++)
-        write_csv_sample(f, frames[i].host_time_s, i, &frames[i].sample, frames[i].dt);
-
-    std::fflush(f);
-    std::fclose(f);
-
-    print_summary(&stats, elapsed, out_path);
-
-    return run_plot_script(out_path) == 0 ? 0 : 1;
+    std::printf("\nExiting.\n");
+    return exit_code;
 }

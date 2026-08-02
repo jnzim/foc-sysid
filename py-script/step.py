@@ -9,6 +9,8 @@ Usage:
 import sys
 from pathlib import Path
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
@@ -100,8 +102,7 @@ ax2.grid(True, alpha=0.3)
 for ax in (ax0, ax1, ax2):
     ax.set_xlim(PLOT_START, PLOT_END)
 
-# Save to drive_data directory.
-out_path = Path("drive_data") / "step_response.png"
+# Save next to the input CSV, whatever directory that happens to be in.
+out_path = csv_path.resolve().parent / "step_response.png"
 plt.savefig(out_path, dpi=150, bbox_inches="tight")
 print(f"Saved {out_path}")
-plt.show()
