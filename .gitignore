@@ -20,4 +20,8 @@ drive_data/
 !docs/step_response.png
 !docs/velocity_bode_plot.png
 !docs/phase_current_polarity_plot.png
-__pycache__/
+!docs/closed_vel_bode_plot.png
+!docs/velocity_step_plot.png
+!docs/ripple_debug_plot.png
+!docs/position_step_plot.png
+!docs/closed_pos_bode_plot.png

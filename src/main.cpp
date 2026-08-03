@@ -4,10 +4,10 @@
 //   ./drive [spi_dev [speed_hz [out_csv]]]
 //
 // CSV columns:
-//   host_time_s, frame, t, dt,
-//   enc_hi, enc_lo, sysid_f,
-//   id_mA, iq_mA, vd_mV, vq_mV, theta_mrad,
-//   ia_mA, ib_mA, adc_c, flags, crc, pad
+//   host_time_s, frame, t, dt, encoder_position,
+//   sysid_f, id_mA, iq_mA, vd_mV, vq_mV, theta_mrad,
+//   ia_mA, ib_mA, iq_cmd_mA, flags, crc, pad,
+//   enc_hi_raw, enc_lo_raw
 
 #include <cerrno>
 #include <csignal>
@@ -50,6 +50,10 @@
 #define SYSID_TEST_VEL_CHIRP           2u
 #define SYSID_TEST_CL_VEL_STEP         4u
 #define SYSID_TEST_RIPPLE_DEBUG        5u
+#define SYSID_TEST_CL_VEL_CHIRP        6u
+#define SYSID_TEST_POSITION_STEP       7u
+#define SYSID_TEST_CL_POS_CHIRP        8u
+#define SYSID_TEST_CINE_SWEEP          9u
 
 static volatile sig_atomic_t g_run = 1;
 
@@ -217,13 +221,20 @@ static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[SYSID_FRAME_LEN]
 //         "ia_mA,ib_mA,adc_c,flags,crc,pad\n");
 // }
 
+// encoder_position is enc_hi/enc_lo combined into a real 32-bit encoder
+// count -- what most tests actually want. enc_hi_raw/enc_lo_raw pass the two
+// halves through unmodified: the position-loop tests (SYSID_TEST_POSITION_STEP,
+// SYSID_TEST_CL_POS_CHIRP) repurpose them on the STM32 side to carry
+// vel_cmd_rad_sec [mrad/s] and measured velocity [counts/s] instead, since
+// encoder_position is otherwise fully redundant with pos_meas for those tests
+// (see foc_sysid_step() telemetry section in foc_sysid.c).
 static void write_csv_header(FILE *f)
 {
     std::fprintf(
         f,
         "host_time_s,frame,t,dt,encoder_position,"
         "sysid_f,id_mA,iq_mA,vd_mV,vq_mV,theta_mrad,"
-        "ia_mA,ib_mA,iq_cmd_mA,flags,crc,pad\n"
+        "ia_mA,ib_mA,iq_cmd_mA,flags,crc,pad,enc_hi_raw,enc_lo_raw\n"
     );
 }
 static void write_csv_sample(FILE *f, double host_time_s, uint32_t frame,
@@ -240,7 +251,7 @@ static void write_csv_sample(FILE *f, double host_time_s, uint32_t frame,
         f,
         "%.9f,%u,%u,%u,"
         "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-        "0x%04X,%u,%u\n",
+        "0x%04X,%u,%u,%d,%d\n",
         host_time_s,
         frame,
         s->t,
@@ -257,7 +268,9 @@ static void write_csv_sample(FILE *f, double host_time_s, uint32_t frame,
         static_cast<int>(s->iq_cmd_mA),
         static_cast<unsigned>(s->flags),
         static_cast<unsigned>(s->crc),
-        static_cast<unsigned>(s->pad)
+        static_cast<unsigned>(s->pad),
+        static_cast<int>(s->enc_hi),
+        static_cast<int>(s->enc_lo)
     );
 }
 
@@ -322,6 +335,14 @@ static std::vector<const char *> plot_scripts_for_test(uint16_t test_id)
             return { "../py-script/velocity_step_plot.py" };
         case SYSID_TEST_RIPPLE_DEBUG:
             return { "../py-script/ripple_debug_plot.py" };
+        case SYSID_TEST_CL_VEL_CHIRP:
+            return { "../py-script/closed_vel_bode_plot.py" };
+        case SYSID_TEST_POSITION_STEP:
+            return { "../py-script/position_step_plot.py" };
+        case SYSID_TEST_CL_POS_CHIRP:
+            return { "../py-script/closed_pos_bode_plot.py" };
+        case SYSID_TEST_CINE_SWEEP:
+            return { "../py-script/cine_overlay_render.py" };
         default:
             return {};
     }
