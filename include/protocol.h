@@ -20,6 +20,7 @@
 #define SPI2_OP_TELEM_REQ       0x04
 #define SPI2_OP_OPEN_LOOP       0x05
 #define SPI2_OP_STOP            0x06
+#define SPI2_OP_MOVE_CMD        0x07  /* M2: single-command move -- see MoveCmd below */
 
 /* Drive state machine values */
 #define DRIVE_IDLE              0x00u
@@ -83,6 +84,9 @@ typedef struct __attribute__((packed)) {
  * Parser: fixed-offset memcpy, validate opcode + CRC.
  * If corrupt: reuse last valid (pos_cmd, vel_cmd) for current DT.
  * Never scan payload for frame delimiters — eliminates 0x01/0x02/0x03 corruption.
+ *
+ * M2 note: this struct is retained (real, verified layout) but is no
+ * longer the primary command path -- see MoveCmd below.
  * =============================================================================
  */
 typedef struct __attribute__((packed)) {
@@ -108,6 +112,9 @@ typedef struct __attribute__((packed)) {
  *   [3..13]  reserved (zero)
  *   [14..15] crc16 (covers bytes 0..13, same TRAJ_CRC_LEN convention as TrajSlot)
  *   [16..31] padding (zeros)
+ *
+ * M2 note: retained (real, verified layout) but no longer the primary
+ * command path -- see MoveCmd below.
  * =============================================================================
  */
 typedef struct __attribute__((packed)) {
@@ -119,6 +126,39 @@ typedef struct __attribute__((packed)) {
 } BlockHdr;
 
 /* =============================================================================
+ * MoveCmd — 32 bytes, sent once per move (SPI2_OP_MOVE_CMD)
+ *
+ * M2 architecture pivot: the STM generates the trapezoidal profile itself
+ * (trap_gen.c) from this single command, rather than the Pi streaming a
+ * precomputed sample vector through a ring buffer. Given the SPI link's
+ * demonstrated corruption under heavy switching, this is a real robustness
+ * win, not just simpler code: command traffic drops from a continuous
+ * 1kHz stream (thousands of packets per move, each exposed to that
+ * corruption) to one small frame. A corrupted MoveCmd just fails its own
+ * CRC and never starts a move -- no move is a far safer failure mode than
+ * a move built from a corrupted mid-stream sample would have been.
+ *
+ * Structure:
+ *   [0]      opcode (0x07 = MOVE_CMD)
+ *   [1]      seq
+ *   [2..5]   target_pos (int32, counts)
+ *   [6..9]   vel_max (int32, counts/s, magnitude)
+ *   [10..13] accel_max (int32, counts/s^2, magnitude)
+ *   [14..15] crc16 (covers bytes 0..13, same convention as TrajSlot/BlockHdr)
+ *   [16..31] padding (zeros)
+ * =============================================================================
+ */
+typedef struct __attribute__((packed)) {
+    uint8_t  opcode;       /* 1 */
+    uint8_t  seq;          /* 1 */
+    int32_t  target_pos;   /* 4 */
+    int32_t  vel_max;      /* 4 */
+    int32_t  accel_max;    /* 4 */
+    uint16_t crc16;        /* 2 */
+    uint8_t  padding[16];  /* 16 — total 32 */
+} MoveCmd;
+
+/* =============================================================================
  * Size assertions — C11/C++ compatible
  * =============================================================================
  */
@@ -126,15 +166,18 @@ typedef struct __attribute__((packed)) {
 static_assert(sizeof(TelemetryFrame) == 32, "TelemetryFrame must be exactly 32 bytes");
 static_assert(sizeof(TrajSlot) == 32, "TrajSlot must be exactly 32 bytes");
 static_assert(sizeof(BlockHdr) == 32, "BlockHdr must be exactly 32 bytes");
+static_assert(sizeof(MoveCmd) == 32, "MoveCmd must be exactly 32 bytes");
 #else
 _Static_assert(sizeof(TelemetryFrame) == 32, "TelemetryFrame must be exactly 32 bytes");
 _Static_assert(sizeof(TrajSlot) == 32, "TrajSlot must be exactly 32 bytes");
 _Static_assert(sizeof(BlockHdr) == 32, "BlockHdr must be exactly 32 bytes");
+_Static_assert(sizeof(MoveCmd) == 32, "MoveCmd must be exactly 32 bytes");
 #endif
 
 #define TRAJ_CRC_LEN      offsetof(TrajSlot, crc16)
 #define TELEM_CRC_LEN     offsetof(TelemetryFrame, crc16)
 #define BLOCK_HDR_CRC_LEN offsetof(BlockHdr, crc16)
+#define MOVE_CMD_CRC_LEN  offsetof(MoveCmd, crc16)
 
 /* =============================================================================
  * CRC-16-CCITT utilities
