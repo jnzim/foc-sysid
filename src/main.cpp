@@ -10,7 +10,6 @@
 //   enc_hi_raw, enc_lo_raw
 
 #include <cerrno>
-#include <cmath>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
@@ -206,12 +205,9 @@ static int spi_open_configure(const char *dev, uint32_t speed_hz)
     return fd;
 }
 
-static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[SYSID_FRAME_LEN],
-                          const uint8_t *tx_override = nullptr)
+static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[SYSID_FRAME_LEN])
 {
     uint8_t tx[SYSID_FRAME_LEN]{};
-    if (tx_override)
-        std::memcpy(tx, tx_override, SYSID_FRAME_LEN);
     std::memset(rx, 0, SYSID_FRAME_LEN);
 
     spi_ioc_transfer tr{};
@@ -228,76 +224,6 @@ static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[SYSID_FRAME_LEN]
         return -1;
     }
     return 0;
-}
-
-// =============================================================================
-// MoveCmd — M2 bench testing (trajectory-streaming plan). If MOVE_CMD_FILE
-// exists, its contents are sent as the very first SPI transaction of the
-// capture below, before entering the normal telemetry-read loop. If it
-// doesn't exist, no MoveCmd is sent and every other SYSID_TEST capture
-// behaves exactly as before -- this is opt-in, not a mode switch.
-//
-// Sending before the drive's ~5s internal ALIGN stage finishes is fine:
-// foc_trajectory_start_move() (the SPI RX ISR's handler) just latches the
-// request; the position tick won't start the generator until traj_stage
-// reaches RUN. See foc_trajectory.c (drive repo) for why that ordering is
-// safe -- so this doesn't need to wait for anything before sending.
-// =============================================================================
-
-#define MOVE_CMD_FILE   "../move_cmd.txt"
-#define SCREW_PITCH_MM  2.0
-#define ENCODER_CPR     8192
-#define COUNTS_PER_MM   (ENCODER_CPR / SCREW_PITCH_MM)   // 4096 counts/mm
-
-// Reads "target_mm vel_mm_s accel_mm_s2" (whitespace-separated) from
-// MOVE_CMD_FILE, converts to counts, and fills *frame with the 32-byte
-// MoveCmd wire frame (opcode, seq, target_pos, vel_max, accel_max, crc16,
-// zero padding) -- same layout/CRC as drive's Include/protocol.h and this
-// tool's own py-script/send_move_cmd.py. Returns false (no move sent) if
-// the file is missing, doesn't parse, or has vel/accel <= 0 -- the latter
-// is rejected here rather than sent, since trap_gen_start() would just
-// hold at the current position for it anyway (fail loud instead of
-// silently no-op-ing a command onto the wire).
-static bool read_move_cmd_file(uint8_t frame[SYSID_FRAME_LEN])
-{
-    FILE *f = std::fopen(MOVE_CMD_FILE, "r");
-    if (!f) return false;
-
-    double target_mm = 0.0, vel_mm_s = 0.0, accel_mm_s2 = 0.0;
-    int n = std::fscanf(f, "%lf %lf %lf", &target_mm, &vel_mm_s, &accel_mm_s2);
-    std::fclose(f);
-
-    if (n != 3)
-    {
-        std::fprintf(stderr,
-                     "%s: expected 3 numbers (target_mm vel_mm_s accel_mm_s2), got %d -- no move sent\n",
-                     MOVE_CMD_FILE, n);
-        return false;
-    }
-    if (vel_mm_s <= 0.0 || accel_mm_s2 <= 0.0)
-    {
-        std::fprintf(stderr, "%s: vel_mm_s and accel_mm_s2 must be > 0 -- no move sent\n",
-                     MOVE_CMD_FILE);
-        return false;
-    }
-
-    static_assert(sizeof(MoveCmd) == SYSID_FRAME_LEN, "MoveCmd must be 32 bytes");
-
-    MoveCmd cmd{};
-    cmd.opcode     = SPI2_OP_MOVE_CMD;
-    cmd.seq        = 1;
-    cmd.target_pos = static_cast<int32_t>(std::lround(target_mm   * COUNTS_PER_MM));
-    cmd.vel_max    = static_cast<int32_t>(std::lround(vel_mm_s    * COUNTS_PER_MM));
-    cmd.accel_max  = static_cast<int32_t>(std::lround(accel_mm_s2 * COUNTS_PER_MM));
-    cmd.crc16      = crc16_calc(reinterpret_cast<const uint8_t *>(&cmd), MOVE_CMD_CRC_LEN);
-
-    std::memcpy(frame, &cmd, SYSID_FRAME_LEN);
-
-    std::printf("MoveCmd loaded from %s: target=%.3fmm (%d counts)  "
-                "vel_max=%.3fmm/s (%d counts/s)  accel_max=%.3fmm/s^2 (%d counts/s^2)\n",
-                MOVE_CMD_FILE, target_mm, cmd.target_pos, vel_mm_s, cmd.vel_max,
-                accel_mm_s2, cmd.accel_max);
-    return true;
 }
 
 // static void write_csv_header(FILE *f)
@@ -431,9 +357,6 @@ static std::vector<const char *> plot_scripts_for_test(uint16_t test_id)
             return { "../py-script/closed_pos_bode_plot.py" };
         case SYSID_TEST_CINE_SWEEP:
             return { "../py-script/cine_overlay_render.py" };
-        case 98:   // M2 diagnostic marker (foc_trajectory.c) -- trapezoidal
-                   // generator bench test, not a real SYSID_TEST_* enum value
-            return { "../py-script/plot_m2.py" };
         default:
             return {};
     }
@@ -580,10 +503,6 @@ int main(int argc, char **argv)
         lgGpioWrite(gpio_h, PIN_FIRE_SYSID, 1);
         std::printf("trigger sent, capturing...\n");
 
-        uint8_t move_frame[SYSID_FRAME_LEN];
-        bool    have_move = read_move_cmd_file(move_frame);
-        bool    move_sent = false;
-
         std::vector<CapturedFrame> frames;
         frames.reserve(static_cast<size_t>(CAPTURE_TIMEOUT_SECONDS * 12000.0));
 
@@ -615,22 +534,11 @@ int main(int argc, char **argv)
                 usleep(static_cast<useconds_t>(wait_s * 1e6));
             next_frame_time += frame_period_s;
 
-            // MoveCmd (if loaded) rides out on MOSI on the very first
-            // transaction of this capture -- simultaneously reads back
-            // whatever telemetry is live on MISO, same full-duplex
-            // transaction as every other read here.
-            const uint8_t *tx_override = (have_move && !move_sent) ? move_frame : nullptr;
-
             uint8_t rx[SYSID_FRAME_LEN];
-            if (spi_read_frame(fd, speed_hz, rx, tx_override) < 0)
+            if (spi_read_frame(fd, speed_hz, rx) < 0)
             {
                 read_error = true;
                 break;
-            }
-            if (tx_override)
-            {
-                move_sent = true;
-                std::printf("MoveCmd sent\n");
             }
 
             // CRC check -- this was the actual bug behind "test ends too
