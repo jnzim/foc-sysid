@@ -28,7 +28,7 @@ from scipy.signal import coherence, csd, welch, detrend
 
 ENCODER_CPR = 8192.0
 FLAG_RUN = 1
-SETTLE_TIME_S = 2.0          # discard settle transient at the start of RUN
+SETTLE_TIME_S = 4.0          # discard settle transient at the start of RUN
 POSITION_LOOP_DECADE = 10.0  # rule of thumb: outer crossover 1 decade below inner BW
 
 
@@ -105,6 +105,17 @@ f_coh, Cxy  = coherence(cmd_ac, meas_ac, fs=fs, nperseg=nperseg)
 
 H = S_cm / (S_cc + 1e-30)   # closed-loop H(f) = vel_meas / vel_cmd
 
+# ── Back out the raw mechanical plant P(s) = vel/iq from the CLOSED-loop
+# measurement, since C(s) (the deployed velocity PI) is known:
+#   H = C*P / (1 + C*P)  ->  P = H / (C*(1-H))
+# Safe alternative to the open-loop iq chirp -- velocity stays regulated by
+# the closed loop the whole time, so there's no back-EMF runaway risk.
+VEL_KP = 0.0239   # A / (rad/s) -- must match deployed loops.c VEL_KP
+VEL_KI = 0.1935   # A / rad     -- must match deployed loops.c VEL_KI
+w_csd = 2.0 * np.pi * f_csd
+C_ctrl = VEL_KP + VEL_KI / (1j * w_csd + 1e-30)
+P_mech = H / (C_ctrl * (1.0 - H) + 1e-30)
+
 mag_db    = 20.0 * np.log10(np.abs(H) + 1e-30)
 phase_deg = np.degrees(np.unwrap(np.angle(H)))
 
@@ -127,6 +138,28 @@ f_bw = interp_log_x_for_y(f_csd[good], mag_good, mag_3db)
 
 print(f"\nClosed velocity loop -- H(s) = vel_meas / vel_cmd")
 print(f"  DC gain (ref)   : {mag_dc:.2f} dB")
+
+# Linear least-squares fit of 1/P = 1/K + j*w*(tau/K) over the good bins --
+# same first-order plant model as bode_vel_plot.py, just derived from the
+# closed-loop data instead of an open-loop chirp.
+if np.any(good):
+    w_good = w_csd[good]
+    inv_P = 1.0 / (P_mech[good] + 1e-30)
+    A = np.column_stack([np.ones_like(w_good), w_good])
+    b_re = inv_P.real
+    b_im = inv_P.imag
+    b_stack = np.concatenate([b_re, b_im])
+    A_full = np.zeros((2 * len(w_good), 2))
+    A_full[:len(w_good), 0] = 1.0
+    A_full[len(w_good):, 1] = w_good
+    x, *_ = np.linalg.lstsq(A_full, b_stack, rcond=None)
+    inv_K, tau_over_K = x
+    K_fit = 1.0 / inv_K
+    tau_fit = tau_over_K * K_fit
+    print(f"\nMechanical plant backed out of closed-loop data -- P(s) = vel/iq:")
+    print(f"  K (gain)    = {K_fit:.3f}  rad/s per A")
+    print(f"  tau         = {tau_fit*1000.0:.2f} ms  ->  fc_plant = {1.0/(2.0*np.pi*tau_fit):.2f} Hz")
+    print(f"  (cross-check against bode_vel_plot.py's open-loop fit)")
 if f_bw is not None:
     print(f"  -3dB bandwidth  : {f_bw:.2f} Hz")
     kp_pos = 2.0 * np.pi * (f_bw / POSITION_LOOP_DECADE)

@@ -8,13 +8,15 @@
 #   bode_plot.png saved next to the input CSV
 #
 # Plant:
-#   P(s) = id / vd = 1 / (Ls + R)
+#   P(s) = iq / vq = 1 / (Ls + R)
 #
 # Loop gain for current controller:
 #   Loop(s) = C(s) P(s)
 #   C(s) = Kp + Ki/s
 
 import sys
+import os
+import datetime
 from pathlib import Path
 
 import numpy as np
@@ -59,6 +61,20 @@ BW_TARGET_HZ = 500.0  # V/A and V/(A*s) gains (KP_I, KI_I) are derived below
 
 # Optional digital/control/PWM/ADC delay in loop margin estimate
 TD_LOOP = 25e-6  # seconds
+
+# -----------------------------------------------------------------------------
+# ACTUAL deployed current-loop gains -- must be kept in sync by hand with
+# CURRENT_LOOP_KP/CURRENT_LOOP_KI in Include/config.h (drive repo). The
+# margin estimate below (gc, PM, GM) is computed from THESE, not from
+# KP_I/KI_I -- KP_I/KI_I are a fresh 500Hz-target design solved from
+# whatever plant this run happens to fit, so a margin estimate built from
+# them would trivially always show ~BW_TARGET_HZ regardless of what's
+# actually flashed. This is the number that answers "does the deployed
+# loop actually hit its target," not "would a fresh design hit it."
+# -----------------------------------------------------------------------------
+
+DEPLOYED_KP = 2.07     # V/A   -- config.h CURRENT_LOOP_KP
+DEPLOYED_KI = 2450.0   # V/(A*s) -- config.h CURRENT_LOOP_KI
 
 
 # -----------------------------------------------------------------------------
@@ -120,31 +136,36 @@ if len(sys.argv) < 2:
 csv_path = Path(sys.argv[1]).resolve()
 out_path = csv_path.parent / "bode_plot.png"
 
+csv_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(csv_path))
+plot_gen_time = datetime.datetime.now()
+print(f"data file  : {csv_path.name}  (written {csv_mtime:%Y-%m-%d %H:%M:%S})")
+print(f"plot gen'd : {plot_gen_time:%Y-%m-%d %H:%M:%S}")
+
 df = pd.read_csv(csv_path)
 
 df = df[df["flags"] == "0x0001"]
 df = df[(df["host_time_s"] > 0.5) & (df["host_time_s"] < 20.0)]
 df = df[df["sysid_f"] > 0]
 df = df[df["dt"] > 0]
-df = df[df["vd_mV"].abs() < 1500]
+df = df[df["vq_mV"].abs() < 1500]
 
 t  = df["host_time_s"].values - df["host_time_s"].min()
-vd = df["vd_mV"].values / 1000.0
+vq = df["vq_mV"].values / 1000.0
 
 
-id_ = df["id_mA"].values / 1000.0
+iq_ = df["iq_mA"].values / 1000.0
 
 fs = 1.0 / np.mean(np.diff(t))
 
 print(f"samples : {len(df)}  fs: {fs:.1f} Hz")
-print(f"vd      : {vd.min()*1000:.1f} to {vd.max()*1000:.1f} mV")
-print(f"id      : {id_.min()*1000:.1f} to {id_.max()*1000:.1f} mA")
+print(f"vq      : {vq.min()*1000:.1f} to {vq.max()*1000:.1f} mV")
+print(f"iq      : {iq_.min()*1000:.1f} to {iq_.max()*1000:.1f} mA")
 print(f"freq    : {df['sysid_f'].min():.1f} to {df['sysid_f'].max():.1f} Hz")
-print(f"corr    : {np.corrcoef(vd, id_)[0,1]:.4f}")
+print(f"corr    : {np.corrcoef(vq, iq_)[0,1]:.4f}")
 
 # Remove DC bias before spectral estimate
-vd_ac = vd - np.mean(vd)
-id_ac = id_ - np.mean(id_)
+vq_ac = vq - np.mean(vq)
+iq_ac = iq_ - np.mean(iq_)
 
 
 # -----------------------------------------------------------------------------
@@ -153,11 +174,11 @@ id_ac = id_ - np.mean(id_)
 
 nperseg = int(fs * 2.0)
 
-f_csd, Piv = csd(vd_ac, id_ac, fs=fs, nperseg=nperseg)
-f_csd, Pvv = welch(vd_ac,     fs=fs, nperseg=nperseg)
-f_coh, Cxy = coherence(vd_ac, id_ac, fs=fs, nperseg=nperseg)
+f_csd, Piv = csd(vq_ac, iq_ac, fs=fs, nperseg=nperseg)
+f_csd, Pvv = welch(vq_ac,     fs=fs, nperseg=nperseg)
+f_coh, Cxy = coherence(vq_ac, iq_ac, fs=fs, nperseg=nperseg)
 
-# Transfer estimate: P = id / vd
+# Transfer estimate: P = iq / vq
 P_meas = Piv / (Pvv + 1e-20)
 
 mag = 20.0 * np.log10(np.abs(P_meas) + 1e-20)
@@ -175,7 +196,7 @@ coh_strong = band & (Cxy >= 0.8)
 
 
 # -----------------------------------------------------------------------------
-# Plant identification — first-order fit P(s) = id/vd = 1/(Ls + R)
+# Plant identification — first-order fit P(s) = iq/vq = 1/(Ls + R)
 #                       = K/(tau*s + 1), K = 1/R, tau = L/R
 # -----------------------------------------------------------------------------
 
@@ -245,14 +266,24 @@ mag_3db = mag_dc - 3.0
 
 
 # -----------------------------------------------------------------------------
-# Current-loop gain and margins
+# Current-loop gain and margins -- uses the ACTUAL deployed gains
+# (DEPLOYED_KP/KI) against the TRUE per-phase plant, not P_conf (which is
+# R_MEAS/L_MEAS as fit, i.e. line-to-line-equivalent -- halve both for the
+# per-phase R/L the firmware's Kp/L relationship actually assumes; see the
+# CURRENT_LOOP_KP/KI derivation comment in config.h).
 # -----------------------------------------------------------------------------
 
-C_i = KP_I + KI_I / s_th
+R_TRUE = R_MEAS / 2.0
+L_TRUE = L_MEAS / 2.0
+P_true = 1.0 / (R_TRUE + s_th * L_TRUE)
+
+print(f"\nTrue per-phase plant (R_MEAS/L_MEAS halved): R={R_TRUE:.3f} ohm  L={L_TRUE*1000:.3f} mH")
+
+C_i = DEPLOYED_KP + DEPLOYED_KI / s_th
 
 Delay_loop = np.exp(-s_th * TD_LOOP)
 
-Loop = C_i * P_conf * Delay_loop
+Loop = C_i * P_true * Delay_loop
 
 loop_mag_db = 20.0 * np.log10(np.abs(Loop) + 1e-20)
 loop_phase_deg = np.degrees(np.unwrap(np.angle(Loop)))
@@ -296,11 +327,11 @@ for ff in [10, 50, 100, 229, 500, 1000]:
         f"coh={Cxy[idx]:.3f}"
     )
 
-print("\nCurrent-loop margin estimate:")
-print("  Loop(s) = C(s)P(s)")
+print("\nCurrent-loop margin estimate (DEPLOYED gains, not a fresh design):")
+print("  Loop(s) = C(s)P(s), P(s) built from the true per-phase plant")
 print("  C(s)    = Kp + Ki/s")
-print(f"  Kp      = {KP_I:.6g} V/A")
-print(f"  Ki      = {KI_I:.6g} V/(A*s)")
+print(f"  Kp      = {DEPLOYED_KP:.6g} V/A   (config.h CURRENT_LOOP_KP)")
+print(f"  Ki      = {DEPLOYED_KI:.6g} V/(A*s)   (config.h CURRENT_LOOP_KI)")
 print(f"  delay   = {TD_LOOP*1e6:.1f} us")
 
 if fgc is not None:
@@ -326,6 +357,13 @@ else:
 
 fig, (ax1, ax2, ax3, ax4, ax5) = plt.subplots(5, 1, figsize=(12, 16))
 
+fig.text(
+    0.995, 0.005,
+    f"data: {csv_path.name} @ {csv_mtime:%Y-%m-%d %H:%M:%S}   "
+    f"|   plot generated: {plot_gen_time:%Y-%m-%d %H:%M:%S}",
+    ha="right", va="bottom", fontsize=8, color="dimgray",
+)
+
 
 # -----------------------------------------------------------------------------
 # 1. Plant magnitude
@@ -335,7 +373,7 @@ ax1.semilogx(
     f_csd[band],
     mag[band],
     "b.-",
-    label="Measured plant id/Vd",
+    label="Measured plant iq/Vq",
     alpha=0.7
 )
 

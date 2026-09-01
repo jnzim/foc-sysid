@@ -32,6 +32,7 @@ df["vq_V"] = df["vq_mV"] / 1000.0
 df["vd_V"] = df["vd_mV"] / 1000.0
 df["ia_A"] = df["ia_mA"] / 1000.0
 df["ib_A"] = df["ib_mA"] / 1000.0
+df["encoder_rev"] = df["encoder_position"] / 8192.0
 
 # iq_cmd may be stored directly or in the repurposed sysid_f field.
 if "iq_cmd_mA" in df.columns:
@@ -48,8 +49,8 @@ else:
     t = df.index / 10000.0
 
 # Show only the actual current-step portion.
-PLOT_START = 0.14
-PLOT_END = 0.30
+PLOT_START = 1.0
+PLOT_END = 2.65
 
 mask = (t >= PLOT_START) & (t <= PLOT_END)
 t = t[mask]
@@ -62,7 +63,7 @@ if df.empty:
 
 fig = plt.figure(figsize=(12, 9))
 fig.suptitle("Closed-Loop Current Step Response", fontsize=14)
-gs = gridspec.GridSpec(3, 1, hspace=0.45)
+gs = gridspec.GridSpec(4, 1, hspace=0.5)
 
 # q-axis current tracking only.
 ax0 = fig.add_subplot(gs[0])
@@ -99,7 +100,17 @@ ax2.set_title("Phase Currents")
 ax2.legend(loc="upper right")
 ax2.grid(True, alpha=0.3)
 
-for ax in (ax0, ax1, ax2):
+# Encoder position -- to check whether the rotor is actually spinning
+# during this test (it uses the real tracked theta, not a fixed angle).
+ax3 = fig.add_subplot(gs[3])
+ax3.plot(t, df["encoder_rev"], label="encoder", linewidth=0.9, color="green")
+ax3.set_ylabel("Position (rev)")
+ax3.set_xlabel("Time (s)")
+ax3.set_title("Encoder Position")
+ax3.legend(loc="upper right")
+ax3.grid(True, alpha=0.3)
+
+for ax in (ax0, ax1, ax2, ax3):
     ax.set_xlim(PLOT_START, PLOT_END)
 
 # Save next to the input CSV, whatever directory that happens to be in.

@@ -17,6 +17,8 @@ Telemetry mapping (same convention as SYSID_TEST_POSITION_STEP):
 """
 
 import sys
+import os
+import datetime
 from pathlib import Path
 
 import matplotlib
@@ -65,6 +67,11 @@ if len(sys.argv) != 2:
 
 csv_path = Path(sys.argv[1]).resolve()
 out_path = csv_path.parent / "closed_pos_bode_plot.png"
+
+csv_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(csv_path))
+plot_gen_time = datetime.datetime.now()
+print(f"data file  : {csv_path.name}  (written {csv_mtime:%Y-%m-%d %H:%M:%S})")
+print(f"plot gen'd : {plot_gen_time:%Y-%m-%d %H:%M:%S}")
 
 df = pd.read_csv(csv_path)
 required = ["host_time_s", "flags", "sysid_f", "iq_cmd_mA", "dt"]
@@ -248,6 +255,7 @@ if pm_pos is not None:
     footer.append(f"gc={f_gc:.2f} Hz, PM={pm_pos:.1f} deg")
 if gm_pos is not None:
     footer.append(f"pc={f_pc:.2f} Hz, GM={gm_pos:.1f} dB")
+footer.append(f"data: {csv_path.name} @ {csv_mtime:%Y-%m-%d %H:%M:%S}")
 fig.text(0.5, 0.005, "  |  ".join(footer), ha="center", fontsize=9, color="dimgray")
 
 plt.tight_layout()

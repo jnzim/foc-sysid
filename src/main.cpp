@@ -11,6 +11,7 @@
 
 #include <cerrno>
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +19,7 @@
 #include <dirent.h>
 #include <limits.h>
 #include <vector>
+#include <map>
 
 #include <fcntl.h>
 #include <linux/spi/spidev.h>
@@ -29,9 +31,21 @@
 
 #include <lgpio.h>
 
+#include "protocol.h"   // crc16_calc() -- same CCITT CRC the STM firmware now stamps into every frame
+
 #define SYSID_FRAME_LEN     32
 #define DEFAULT_DEV         "/dev/spidev0.0"
 #define DEFAULT_SPEED_HZ    4000000u
+// Read loop was issuing back-to-back SPI transactions as fast as the bus
+// and kernel driver allowed (no pacing at all) -- at 4MHz/32B that's on the
+// order of 10+ kHz of CS toggles, each one firing the STM's highest-priority
+// IRQ (EXTI15_10, NVIC prio 0). That was starving the ADC's own interrupt
+// (prio 3) for multiple ms at a time during CL_VEL_CHIRP instability events
+// (confirmed via ADC1->SR telemetry -- JEOC set and never serviced). Current
+// loop ID is done, so we don't need 10kHz+ telemetry -- throttling the host
+// read rate down to 5kHz gives the STM's IRQ priorities enough breathing
+// room between transactions.
+#define TARGET_FRAME_RATE_HZ  10000.0
 // "latest" is overwritten every run — no digging through old plots to find
 // the one from the test you just ran. Move out anything you want to keep.
 #define DEFAULT_OUTDIR      "../drive_data/latest"
@@ -498,6 +512,8 @@ int main(int argc, char **argv)
         bool     saw_run   = false;
         bool     read_error = false;
         const double t0    = monotonic_seconds();
+        const double frame_period_s = 1.0 / TARGET_FRAME_RATE_HZ;
+        double next_frame_time = 0.0;
 
         while (g_run)
         {
@@ -510,11 +526,35 @@ int main(int argc, char **argv)
                 break;
             }
 
+            // Pace transactions to TARGET_FRAME_RATE_HZ instead of hammering
+            // the bus as fast as it'll go -- fixed schedule (not sleep-after-
+            // read) so pacing doesn't drift with read jitter.
+            const double wait_s = next_frame_time - elapsed_now;
+            if (wait_s > 0.0)
+                usleep(static_cast<useconds_t>(wait_s * 1e6));
+            next_frame_time += frame_period_s;
+
             uint8_t rx[SYSID_FRAME_LEN];
             if (spi_read_frame(fd, speed_hz, rx) < 0)
             {
                 read_error = true;
                 break;
+            }
+
+            // CRC check -- this was the actual bug behind "test ends too
+            // early": SysIdSample.crc was hardcoded to 0 on the firmware
+            // side (no integrity checking at all), so a single corrupted
+            // frame's flags byte could alias into a valid-looking
+            // SYSID_STAGE_IDLE and make this loop think the sweep finished
+            // partway through. Firmware now stamps a real CRC (spi.c); a
+            // mismatch here means a torn/corrupted frame -- discard it
+            // entirely rather than let it touch dt/stage-detection/output.
+            const uint16_t crc_calc = crc16_calc(rx, offsetof(SysIdSample, crc));
+            const uint16_t crc_rx   = get_u16_le(&rx[offsetof(SysIdSample, crc)]);
+            if (crc_calc != crc_rx)
+            {
+                stats.torn_frames++;
+                continue;
             }
 
             SysIdSample s = decode_sysid_sample(rx);

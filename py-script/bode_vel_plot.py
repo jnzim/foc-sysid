@@ -30,6 +30,7 @@ PI controller design:
 """
 
 import sys
+import datetime
 from pathlib import Path
 
 import matplotlib
@@ -143,7 +144,20 @@ iq_cmd     = df["iq_cmd_mA"].to_numpy(dtype=np.float64) / 1000.0
 iq_meas    = df["iq_mA"].to_numpy(dtype=np.float64)  / 1000.0
 
 theta_ac = detrend(theta_mech, type="linear")
-iq_ac    = detrend(iq_cmd,    type="linear")
+# Reference is iq_MEASURED, not iq_cmd -- iq_cmd is corrupted by whichever
+# current-loop implementation happens to be running (P-only for this test,
+# to avoid integrator ringing on a stick-slip disturbance). Under P-only,
+# iq_meas/iq_cmd tracking ratio was measured to drop from ~0.63 at low
+# velocity to ~0.23 at high velocity (back-EMF disturbance rejection failing
+# without integral action) -- using iq_cmd as the reference would fold that
+# current-loop-specific, velocity-dependent tracking error directly into the
+# "mechanical" fit, distorting both its gain and its shape. iq_meas is the
+# real, physical torque-producing current -- whatever the current loop
+# actually delivered, back-EMF shortfall already included as real measured
+# fact -- so P(s)=omega/iq_meas is the true mechanical plant, independent of
+# which current-loop implementation (P-only here, PI in real operation)
+# produced that current.
+iq_ac    = detrend(iq_meas,   type="linear")
 
 nperseg  = min(len(df), max(256, int(fs * WELCH_WINDOW_S)))
 
@@ -310,6 +324,16 @@ ax_doc.text(0.5, 0.97,
             "Velocity Loop System Identification & PI Controller Design",
             transform=ax_doc.transAxes, ha="center", va="top",
             fontsize=13, fontweight="bold")
+
+# Capture timestamp -- CSV mtime, i.e. when the Pi finished writing this
+# file (right after the sweep completed), not when this script happens to
+# run. Needed to tell repeat runs apart when checking result-to-result
+# consistency across multiple sweeps.
+_capture_dt = datetime.datetime.fromtimestamp(csv_path.stat().st_mtime)
+ax_doc.text(0.5, 0.925,
+            f"captured: {_capture_dt.strftime('%Y-%m-%d %H:%M:%S')}",
+            transform=ax_doc.transAxes, ha="center", va="top",
+            fontsize=9, color="dimgray")
 
 ax_doc.axhline(0.78, xmin=0.02, xmax=0.98,   # won't render on axis("off")
                color="black", linewidth=0.8)   # kept for reference; use text separator
