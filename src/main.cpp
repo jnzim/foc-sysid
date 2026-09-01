@@ -357,9 +357,6 @@ static std::vector<const char *> plot_scripts_for_test(uint16_t test_id)
             return { "../py-script/closed_pos_bode_plot.py" };
         case SYSID_TEST_CINE_SWEEP:
             return { "../py-script/cine_overlay_render.py" };
-        case 98:   // M2 diagnostic marker (foc_trajectory.c) -- trapezoidal
-                   // generator bench test, not a real SYSID_TEST_* enum value
-            return { "../py-script/plot_m2.py" };
         default:
             return {};
     }
