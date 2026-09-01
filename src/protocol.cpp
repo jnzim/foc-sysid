@@ -17,3 +17,9 @@ uint16_t crc16_calc(const uint8_t* data, size_t len)
     }
     return crc;
 }
+
+bool crc16_valid(const TrajSlot* s, size_t crc_len)
+{
+    uint16_t calc = crc16_calc((const uint8_t*)s, crc_len);
+    return (calc == s->crc16);
+}

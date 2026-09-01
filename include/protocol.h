@@ -36,6 +36,14 @@
 /* =============================================================================
  * TelemetryFrame — 32 bytes
  * STM → Pi status frame
+ *
+ * NOTE: this file intentionally does NOT define SysIdSample -- that's a
+ * separate, decode-only convention main.cpp defines locally with its own
+ * per-test-repurposable field names (enc_hi/enc_lo/sysid_f/iq_cmd_mA/etc,
+ * see main.cpp's own `struct SysIdSample`). Defining it here too would
+ * collide with that local definition (confirmed: this exact collision was
+ * hit and reverted while adding BlockHdr/TelemetryFrame below -- don't
+ * reintroduce it).
  * =============================================================================
  */
 typedef struct __attribute__((packed)) {
@@ -49,7 +57,11 @@ typedef struct __attribute__((packed)) {
     uint32_t samples_consumed;
     int16_t  iq_cmd;
     int16_t  i_q_fbk;
-    int16_t  v_q_cmd;
+    uint16_t crc16;    /* covers bytes 0..(offsetof-1) -- TELEM_CRC_LEN below.
+                        * Was v_q_cmd -- dropped to make room. This was the one
+                        * 32-byte frame in the protocol with no self-check at
+                        * all (TrajSlot already has one); cheapest time to fix
+                        * it is before anything populates it. */
 } TelemetryFrame;
 
 /* =============================================================================
@@ -84,18 +96,45 @@ typedef struct __attribute__((packed)) {
 } TrajSlot;
 
 /* =============================================================================
+ * BlockHdr — 32 bytes, sent once per move (SPI2_OP_BLOCK_HDR) before the DATA
+ * stream. Layout confirmed against the actual working trajectory-streamer
+ * prototype (jz-dev branch, src/main.cpp) -- not invented: sample_count is a
+ * 16-bit field at offset 1-2 (matches the STM side's existing
+ * uint16_t expected_samples), not the 32-bit count an initial draft assumed.
+ *
+ * Structure:
+ *   [0]      opcode (0x01 = BLOCK_HDR)
+ *   [1..2]   sample_count (uint16, total TrajSlots in this move)
+ *   [3..13]  reserved (zero)
+ *   [14..15] crc16 (covers bytes 0..13, same TRAJ_CRC_LEN convention as TrajSlot)
+ *   [16..31] padding (zeros)
+ * =============================================================================
+ */
+typedef struct __attribute__((packed)) {
+    uint8_t  opcode;       /* 1 */
+    uint16_t sample_count; /* 2 */
+    uint8_t  reserved[11]; /* 11 */
+    uint16_t crc16;        /* 2 */
+    uint8_t  padding[16];  /* 16 — total 32 */
+} BlockHdr;
+
+/* =============================================================================
  * Size assertions — C11/C++ compatible
  * =============================================================================
  */
 #ifdef __cplusplus
 static_assert(sizeof(TelemetryFrame) == 32, "TelemetryFrame must be exactly 32 bytes");
 static_assert(sizeof(TrajSlot) == 32, "TrajSlot must be exactly 32 bytes");
+static_assert(sizeof(BlockHdr) == 32, "BlockHdr must be exactly 32 bytes");
 #else
 _Static_assert(sizeof(TelemetryFrame) == 32, "TelemetryFrame must be exactly 32 bytes");
 _Static_assert(sizeof(TrajSlot) == 32, "TrajSlot must be exactly 32 bytes");
+_Static_assert(sizeof(BlockHdr) == 32, "BlockHdr must be exactly 32 bytes");
 #endif
 
-#define TRAJ_CRC_LEN  offsetof(TrajSlot, crc16)
+#define TRAJ_CRC_LEN      offsetof(TrajSlot, crc16)
+#define TELEM_CRC_LEN     offsetof(TelemetryFrame, crc16)
+#define BLOCK_HDR_CRC_LEN offsetof(BlockHdr, crc16)
 
 /* =============================================================================
  * CRC-16-CCITT utilities
