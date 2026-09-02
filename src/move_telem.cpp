@@ -138,14 +138,16 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
 
     uint8_t move_frame[FRAME_LEN];
     build_move_cmd(move_frame, target_pos, vel_max, accel_max);
-    bool move_sent = false;
+    printf("sending MoveCmd (target=%d vel_max=%d accel_max=%d, counts/counts-per-s/counts-per-s^2) "
+           "until SERVO_ON confirms it landed...\n", target_pos, vel_max, accel_max);
 
     struct Sample { double host_time_s; TelemetryFrame frame; };
     std::vector<Sample> samples;
     samples.reserve(20000);
 
-    uint32_t torn_frames = 0;
-    bool     saw_servo_on = false;
+    uint32_t torn_frames    = 0;
+    uint32_t move_cmd_sends = 0;
+    bool     saw_servo_on   = false;
 
     const double t0 = now_s();
     const double frame_period_s = 1.0 / TARGET_FRAME_RATE_HZ;
@@ -164,15 +166,17 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
         if (wait_s > 0.0) usleep(static_cast<useconds_t>(wait_s * 1e6));
         next_frame_time += frame_period_s;
 
+        // Keep resending the MoveCmd every transaction until we see
+        // confirmation it was received (drive_state -> SERVO_ON) --
+        // sending it exactly once meant a single torn transaction (normal,
+        // ~3-5% baseline rate) silently dropped the command with no way to
+        // tell and no retry. A corrupted MoveCmd fails its own CRC on the
+        // STM and is safely ignored either way, and re-latching the same
+        // not-yet-started move is harmless, so resending costs nothing.
         uint8_t rx[FRAME_LEN];
-        const uint8_t *tx_override = move_sent ? nullptr : move_frame;
+        const uint8_t *tx_override = saw_servo_on ? nullptr : move_frame;
         if (spi_read_frame(fd, speed_hz, rx, tx_override) < 0) break;
-        if (!move_sent)
-        {
-            move_sent = true;
-            printf("MoveCmd sent: target=%d vel_max=%d accel_max=%d (counts, counts/s, counts/s^2)\n",
-                   target_pos, vel_max, accel_max);
-        }
+        if (tx_override) move_cmd_sends++;
 
         TelemetryFrame frame;
         memcpy(&frame, rx, FRAME_LEN);
@@ -182,12 +186,22 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
 
         samples.push_back({now_s() - t0, frame});
 
-        if (frame.drive_state == DRIVE_SERVO_ON) saw_servo_on = true;
+        if (frame.drive_state == DRIVE_SERVO_ON && !saw_servo_on)
+        {
+            saw_servo_on = true;
+            printf("MoveCmd confirmed received after %u send(s)\n", move_cmd_sends);
+        }
         if (saw_servo_on && frame.drive_state == DRIVE_IDLE)
         {
             printf("move complete after %zu frames (%u torn)\n", samples.size(), torn_frames);
             break;
         }
+    }
+
+    if (!saw_servo_on)
+    {
+        fprintf(stderr, "MoveCmd never confirmed received after %u sends (%u torn frames) -- "
+                        "check the SPI link, not just this command\n", move_cmd_sends, torn_frames);
     }
 
     if (samples.empty())
