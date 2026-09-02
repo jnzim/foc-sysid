@@ -342,28 +342,44 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
     return 0;
 }
 
-// If MOVE_CMD_FILE exists and parses as three whitespace-separated numbers
-// (target_mm vel_mm_s accel_mm_s2), use those -- same file/format the old
-// pre-rebuild tool used, so editing it (no rebuild needed) is how you
-// change the move when launching via a task/shortcut that can't pass CLI
-// args (e.g. VS Code's Cmd+Shift+B, which always runs this with none).
+// If MOVE_CMD_FILE exists, each non-empty, non-comment ('#') line is one
+// move ("target_mm vel_mm_s accel_mm_s2") -- same file/format the old
+// pre-rebuild tool used for a single line, extended here to a queue: every
+// line becomes one move, run in order, each one waited out to completion
+// (or timeout/error) before the next is sent. Editing this file (no
+// rebuild needed) is how you change the queue when launching via a
+// task/shortcut that can't pass CLI args (e.g. VS Code's Cmd+Shift+B,
+// which always runs this with none).
 #define MOVE_CMD_FILE "../move_cmd.txt"
 
-static bool read_move_cmd_file(double *target_mm, double *vel_mm_s, double *accel_mm_s2)
+struct MoveSpec { double target_mm, vel_mm_s, accel_mm_s2; };
+
+static bool read_move_cmd_file(std::vector<MoveSpec> *moves)
 {
     FILE *f = fopen(MOVE_CMD_FILE, "r");
     if (!f) return false;
 
-    int n = fscanf(f, "%lf %lf %lf", target_mm, vel_mm_s, accel_mm_s2);
-    fclose(f);
-
-    if (n != 3)
+    char line[256];
+    int lineno = 0;
+    while (fgets(line, sizeof(line), f))
     {
-        fprintf(stderr, "%s: expected 3 numbers (target_mm vel_mm_s accel_mm_s2), got %d -- ignoring\n",
-                MOVE_CMD_FILE, n);
-        return false;
+        lineno++;
+        // Skip blank lines and '#' comments.
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0' || *p == '\n' || *p == '#') continue;
+
+        MoveSpec m;
+        if (sscanf(p, "%lf %lf %lf", &m.target_mm, &m.vel_mm_s, &m.accel_mm_s2) != 3)
+        {
+            fprintf(stderr, "%s:%d: expected 3 numbers (target_mm vel_mm_s accel_mm_s2) -- skipping\n",
+                    MOVE_CMD_FILE, lineno);
+            continue;
+        }
+        moves->push_back(m);
     }
-    return true;
+    fclose(f);
+    return !moves->empty();
 }
 
 int main(int argc, char **argv)
@@ -372,43 +388,43 @@ int main(int argc, char **argv)
     // Physical units in, counts out -- 2mm screw pitch, 8192 counts/rev ->
     // 4096 counts/mm. target_mm is RELATIVE to wherever the stage is when
     // the move starts -- sending the same command twice moves twice, it
-    // does not repeat the same absolute destination. Defaults match the
-    // "gentle first test" scale used elsewhere on this project.
+    // does not repeat the same absolute destination.
     //
-    // If run with no arguments at all, MOVE_CMD_FILE is checked first --
-    // CLI args (when given) always take priority over the file.
-    double target_mm  = 0.3;
-    double vel_mm_s    = 1.0;
-    double accel_mm_s2 = 5.0;
+    // With CLI args: runs that one move. With none: runs every move listed
+    // in MOVE_CMD_FILE, in order, each one waited out to completion before
+    // the next is sent -- or, if that file doesn't exist/parse, a single
+    // default "gentle first test" move.
+    std::vector<MoveSpec> moves;
+    if (argc > 1)
+    {
+        MoveSpec m;
+        m.target_mm    = strtod(argv[1], nullptr);
+        m.vel_mm_s     = (argc > 2) ? strtod(argv[2], nullptr) : 1.0;
+        m.accel_mm_s2  = (argc > 3) ? strtod(argv[3], nullptr) : 5.0;
+        moves.push_back(m);
+    }
+    else if (!read_move_cmd_file(&moves))
+    {
+        moves.push_back({0.3, 1.0, 5.0});
+    }
+    else
+    {
+        printf("using %s: %zu move(s) queued\n", MOVE_CMD_FILE, moves.size());
+    }
 
-    if (argc == 1 && read_move_cmd_file(&target_mm, &vel_mm_s, &accel_mm_s2))
-        printf("using %s: target=%.3f vel=%.3f accel=%.3f\n",
-               MOVE_CMD_FILE, target_mm, vel_mm_s, accel_mm_s2);
-
-    if (argc > 1) target_mm    = strtod(argv[1], nullptr);
-    if (argc > 2) vel_mm_s     = strtod(argv[2], nullptr);
-    if (argc > 3) accel_mm_s2  = strtod(argv[3], nullptr);
     const char *dev      = (argc > 4) ? argv[4] : DEFAULT_DEV;
     uint32_t    speed_hz = (argc > 5) ? static_cast<uint32_t>(strtoul(argv[5], nullptr, 0))
                                        : DEFAULT_SPEED_HZ;
 
-    if (vel_mm_s <= 0.0 || accel_mm_s2 <= 0.0)
+    for (const auto &m : moves)
     {
-        fprintf(stderr, "vel_mm_s and accel_mm_s2 must be > 0\n");
-        return 1;
+        if (m.vel_mm_s <= 0.0 || m.accel_mm_s2 <= 0.0)
+        {
+            fprintf(stderr, "vel_mm_s and accel_mm_s2 must be > 0 (target=%.3f vel=%.3f accel=%.3f)\n",
+                    m.target_mm, m.vel_mm_s, m.accel_mm_s2);
+            return 1;
+        }
     }
-
-    static const double SCREW_PITCH_MM = 2.0;
-    static const double ENCODER_CPR    = 8192.0;
-    static const double COUNTS_PER_MM  = ENCODER_CPR / SCREW_PITCH_MM;   // 4096
-
-    int32_t target_pos = static_cast<int32_t>(lround(target_mm  * COUNTS_PER_MM));
-    int32_t vel_max     = static_cast<int32_t>(lround(vel_mm_s   * COUNTS_PER_MM));
-    int32_t accel_max   = static_cast<int32_t>(lround(accel_mm_s2 * COUNTS_PER_MM));
-
-    printf("target: %.3f mm (%d counts)   vel_max: %.3f mm/s (%d counts/s)   "
-           "accel_max: %.3f mm/s^2 (%d counts/s^2)\n",
-           target_mm, target_pos, vel_mm_s, vel_max, accel_mm_s2, accel_max);
 
     static_assert(sizeof(TelemetryFrame) == FRAME_LEN, "TelemetryFrame must be 32 bytes");
 
@@ -430,9 +446,16 @@ int main(int argc, char **argv)
 
     printf("device : %s\nspeed  : %u Hz\ntimeout: %.1f s\n", dev, speed_hz, TIMEOUT_SECONDS);
 
-    // Re-arms after every capture instead of exiting -- flash/reset the STM
-    // for the next test, then hit Enter here when it's booted and ready.
-    // Same idiom as main.cpp's own capture loop.
+    static const double SCREW_PITCH_MM = 2.0;
+    static const double ENCODER_CPR    = 8192.0;
+    static const double COUNTS_PER_MM  = ENCODER_CPR / SCREW_PITCH_MM;   // 4096
+
+    // Re-arms after every full queue instead of exiting -- flash/reset the
+    // STM, then hit Enter here when it's booted and ready. Same idiom as
+    // main.cpp's own capture loop. Every move in the queue runs one at a
+    // time, each waited out to completion (capture_one_move blocks until
+    // "move complete" or timeout/error) before the next is sent -- no
+    // Enter-press needed between moves within one queue.
     while (g_run)
     {
         if (!wait_for_enter("Press Enter once the STM is flashed and ready "
@@ -440,7 +463,20 @@ int main(int argc, char **argv)
             break;
         if (!g_run) break;
 
-        capture_one_move(fd, gpio_h, speed_hz, target_pos, vel_max, accel_max);
+        for (size_t i = 0; i < moves.size() && g_run; i++)
+        {
+            const MoveSpec &m = moves[i];
+            int32_t target_pos = static_cast<int32_t>(lround(m.target_mm   * COUNTS_PER_MM));
+            int32_t vel_max     = static_cast<int32_t>(lround(m.vel_mm_s    * COUNTS_PER_MM));
+            int32_t accel_max   = static_cast<int32_t>(lround(m.accel_mm_s2 * COUNTS_PER_MM));
+
+            printf("\n--- move %zu/%zu: target=%.3f mm (%d counts)  vel_max=%.3f mm/s (%d counts/s)  "
+                   "accel_max=%.3f mm/s^2 (%d counts/s^2) ---\n",
+                   i + 1, moves.size(), m.target_mm, target_pos, m.vel_mm_s, vel_max,
+                   m.accel_mm_s2, accel_max);
+
+            capture_one_move(fd, gpio_h, speed_hz, target_pos, vel_max, accel_max);
+        }
     }
 
     close(fd);
