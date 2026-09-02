@@ -20,6 +20,7 @@
 #define SPI2_OP_TELEM_REQ       0x04
 #define SPI2_OP_OPEN_LOOP       0x05
 #define SPI2_OP_STOP            0x06
+#define SPI2_OP_MOVE_CMD        0x07  /* single-command move -- see MoveCmd below */
 
 /* Drive state machine values */
 #define DRIVE_IDLE              0x00u
@@ -84,19 +85,48 @@ typedef struct __attribute__((packed)) {
 } TrajSlot;
 
 /* =============================================================================
+ * MoveCmd — 32 bytes, sent once per move (SPI2_OP_MOVE_CMD)
+ *
+ * Pi -> STM: one command per move. The STM generates the trapezoidal
+ * profile itself (trap_gen.c) from these three numbers -- no streaming.
+ *
+ * Structure:
+ *   [0]      opcode (0x07 = MOVE_CMD)
+ *   [1]      seq
+ *   [2..5]   target_pos (int32, counts, relative to post-ALIGN zero)
+ *   [6..9]   vel_max    (int32, counts/s, magnitude)
+ *   [10..13] accel_max  (int32, counts/s^2, magnitude)
+ *   [14..15] crc16 (covers bytes 0..13)
+ *   [16..31] padding (zeros)
+ * =============================================================================
+ */
+typedef struct __attribute__((packed)) {
+    uint8_t  opcode;       /* 1 */
+    uint8_t  seq;          /* 1 */
+    int32_t  target_pos;   /* 4 */
+    int32_t  vel_max;      /* 4 */
+    int32_t  accel_max;    /* 4 */
+    uint16_t crc16;        /* 2 */
+    uint8_t  padding[16];  /* 16 — total 32 */
+} MoveCmd;
+
+/* =============================================================================
  * Size assertions — C11/C++ compatible
  * =============================================================================
  */
 #ifdef __cplusplus
 static_assert(sizeof(TelemetryFrame) == 32, "TelemetryFrame must be exactly 32 bytes");
 static_assert(sizeof(TrajSlot) == 32, "TrajSlot must be exactly 32 bytes");
+static_assert(sizeof(MoveCmd) == 32, "MoveCmd must be exactly 32 bytes");
 #else
 _Static_assert(sizeof(TelemetryFrame) == 32, "TelemetryFrame must be exactly 32 bytes");
 _Static_assert(sizeof(TrajSlot) == 32, "TrajSlot must be exactly 32 bytes");
+_Static_assert(sizeof(MoveCmd) == 32, "MoveCmd must be exactly 32 bytes");
 #endif
 
-#define TRAJ_CRC_LEN   offsetof(TrajSlot, crc16)
-#define TELEM_CRC_LEN  offsetof(TelemetryFrame, crc16)
+#define TRAJ_CRC_LEN      offsetof(TrajSlot, crc16)
+#define TELEM_CRC_LEN     offsetof(TelemetryFrame, crc16)
+#define MOVE_CMD_CRC_LEN  offsetof(MoveCmd, crc16)
 
 /* =============================================================================
  * CRC-16-CCITT utilities

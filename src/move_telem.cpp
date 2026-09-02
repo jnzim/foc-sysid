@@ -1,15 +1,18 @@
-// move_telem.cpp — capture one boot-triggered move's real TelemetryFrame
-// telemetry, write it to CSV, plot it.
+// move_telem.cpp — send one MoveCmd, capture the real TelemetryFrame
+// telemetry for that move, write it to CSV, plot it.
 //
 // This is a separate, minimal tool -- it does not touch main.cpp or any of
 // the existing SysID test types. It reads the STM's TelemetryFrame wire
 // format directly (protocol.h), field for field, with no relabeling: the
 // CSV columns are exactly the struct's own field names.
 //
-// At this step the STM starts its move on its own at boot (no MoveCmd sent
-// yet -- that's a later step); this tool just pulses the same boot-gate
-// GPIO trigger the existing main.cpp tool uses, then captures whatever
-// telemetry comes back until the move is done.
+// Sequence: pulse the boot-gate GPIO trigger (same one main.cpp uses --
+// the STM blocks at boot until it sees this, regardless of firmware mode),
+// send one MoveCmd as the first SPI transaction, then capture telemetry
+// until the move is done. Sending MoveCmd before the STM's ~5s internal
+// ALIGN finishes is fine -- foc_trajectory_start_move() (the SPI RX ISR's
+// handler) just latches the request; the position tick won't start the
+// generator until ALIGN completes. See foc_trajectory.c for why that's safe.
 //
 // "Done" = drive_state was DRIVE_SERVO_ON at some point, then went back to
 // DRIVE_IDLE. No magic numbers, no test_id markers -- just the real state.
@@ -59,9 +62,15 @@ static int spi_open_configure(const char *dev, uint32_t speed_hz)
     return fd;
 }
 
-static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[FRAME_LEN])
+// tx_override, if non-null, rides out on MOSI for this one transaction
+// (used to send the MoveCmd on the very first read of a capture) --
+// simultaneously reads back whatever telemetry is live on MISO, same
+// full-duplex transaction as every other read here.
+static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[FRAME_LEN],
+                           const uint8_t *tx_override = nullptr)
 {
     uint8_t tx[FRAME_LEN] = {0};
+    if (tx_override) memcpy(tx, tx_override, FRAME_LEN);
     memset(rx, 0, FRAME_LEN);
 
     spi_ioc_transfer tr{};
@@ -77,6 +86,23 @@ static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[FRAME_LEN])
         return -1;
     }
     return 0;
+}
+
+// Builds the 32-byte MoveCmd wire frame for one move.
+static void build_move_cmd(uint8_t frame[FRAME_LEN], int32_t target_pos,
+                            int32_t vel_max, int32_t accel_max)
+{
+    static_assert(sizeof(MoveCmd) == FRAME_LEN, "MoveCmd must be 32 bytes");
+
+    MoveCmd cmd{};
+    cmd.opcode     = SPI2_OP_MOVE_CMD;
+    cmd.seq        = 1;
+    cmd.target_pos = target_pos;
+    cmd.vel_max    = vel_max;
+    cmd.accel_max  = accel_max;
+    cmd.crc16      = crc16_calc(reinterpret_cast<const uint8_t *>(&cmd), MOVE_CMD_CRC_LEN);
+
+    memcpy(frame, &cmd, FRAME_LEN);
 }
 
 static double now_s(void)
@@ -99,7 +125,8 @@ static bool wait_for_enter(const char *prompt)
     return fgets(line, sizeof(line), stdin) != nullptr;
 }
 
-static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz)
+static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
+                             int32_t target_pos, int32_t vel_max, int32_t accel_max)
 {
     // Boot-gate trigger -- same 10ms active-low pulse main.cpp uses. The
     // STM blocks at boot until it sees this, regardless of what firmware
@@ -108,6 +135,10 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz)
     usleep(10000);
     lgGpioWrite(gpio_h, PIN_FIRE_SYSID, 1);
     printf("trigger sent, capturing...\n");
+
+    uint8_t move_frame[FRAME_LEN];
+    build_move_cmd(move_frame, target_pos, vel_max, accel_max);
+    bool move_sent = false;
 
     struct Sample { double host_time_s; TelemetryFrame frame; };
     std::vector<Sample> samples;
@@ -134,7 +165,14 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz)
         next_frame_time += frame_period_s;
 
         uint8_t rx[FRAME_LEN];
-        if (spi_read_frame(fd, speed_hz, rx) < 0) break;
+        const uint8_t *tx_override = move_sent ? nullptr : move_frame;
+        if (spi_read_frame(fd, speed_hz, rx, tx_override) < 0) break;
+        if (!move_sent)
+        {
+            move_sent = true;
+            printf("MoveCmd sent: target=%d vel_max=%d accel_max=%d (counts, counts/s, counts/s^2)\n",
+                   target_pos, vel_max, accel_max);
+        }
 
         TelemetryFrame frame;
         memcpy(&frame, rx, FRAME_LEN);
@@ -183,9 +221,22 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz)
 
 int main(int argc, char **argv)
 {
-    const char *dev      = (argc > 1) ? argv[1] : DEFAULT_DEV;
-    uint32_t    speed_hz = (argc > 2) ? static_cast<uint32_t>(strtoul(argv[2], nullptr, 0))
-                                       : DEFAULT_SPEED_HZ;
+    // Usage: move_telem [target_pos] [vel_max] [accel_max] [dev] [speed_hz]
+    // First three are counts / counts/s / counts/s^2 (the wire units) --
+    // defaults match the values this move was bench-verified with under
+    // the boot-scaffolding version of this test.
+    int32_t     target_pos = (argc > 1) ? static_cast<int32_t>(strtol(argv[1], nullptr, 0)) : 3900;
+    int32_t     vel_max    = (argc > 2) ? static_cast<int32_t>(strtol(argv[2], nullptr, 0)) : 3900;
+    int32_t     accel_max  = (argc > 3) ? static_cast<int32_t>(strtol(argv[3], nullptr, 0)) : 13000;
+    const char *dev        = (argc > 4) ? argv[4] : DEFAULT_DEV;
+    uint32_t    speed_hz   = (argc > 5) ? static_cast<uint32_t>(strtoul(argv[5], nullptr, 0))
+                                         : DEFAULT_SPEED_HZ;
+
+    if (vel_max <= 0 || accel_max <= 0)
+    {
+        fprintf(stderr, "vel_max and accel_max must be > 0\n");
+        return 1;
+    }
 
     static_assert(sizeof(TelemetryFrame) == FRAME_LEN, "TelemetryFrame must be 32 bytes");
 
@@ -217,7 +268,7 @@ int main(int argc, char **argv)
             break;
         if (!g_run) break;
 
-        capture_one_move(fd, gpio_h, speed_hz);
+        capture_one_move(fd, gpio_h, speed_hz, target_pos, vel_max, accel_max);
     }
 
     close(fd);
