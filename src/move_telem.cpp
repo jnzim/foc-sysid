@@ -15,6 +15,7 @@
 // DRIVE_IDLE. No magic numbers, no test_id markers -- just the real state.
 
 #include <cerrno>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -85,30 +86,21 @@ static double now_s(void)
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-int main(int argc, char **argv)
+static volatile sig_atomic_t g_run = 1;
+static void sigint_handler(int sig) { (void)sig; g_run = 0; }
+
+// Blocks on a line of stdin. Returns false on EOF/Ctrl-D (or a signal
+// interrupting the read), which the caller treats as "stop looping".
+static bool wait_for_enter(const char *prompt)
 {
-    const char *dev      = (argc > 1) ? argv[1] : DEFAULT_DEV;
-    uint32_t    speed_hz = (argc > 2) ? static_cast<uint32_t>(strtoul(argv[2], nullptr, 0))
-                                       : DEFAULT_SPEED_HZ;
+    printf("\n%s", prompt);
+    fflush(stdout);
+    char line[64];
+    return fgets(line, sizeof(line), stdin) != nullptr;
+}
 
-    static_assert(sizeof(TelemetryFrame) == FRAME_LEN, "TelemetryFrame must be 32 bytes");
-
-    int gpio_h = lgGpiochipOpen(0);
-    if (gpio_h < 0) { fprintf(stderr, "lgGpiochipOpen failed\n"); return 1; }
-
-    lgGpioFree(gpio_h, PIN_FIRE_SYSID);
-    if (lgGpioClaimOutput(gpio_h, 0, PIN_FIRE_SYSID, 1) < 0)
-    {
-        fprintf(stderr, "lgGpioClaimOutput failed\n");
-        lgGpiochipClose(gpio_h);
-        return 1;
-    }
-
-    int fd = spi_open_configure(dev, speed_hz);
-    if (fd < 0) { lgGpiochipClose(gpio_h); return 1; }
-
-    printf("device : %s\nspeed  : %u Hz\ntimeout: %.1f s\n", dev, speed_hz, TIMEOUT_SECONDS);
-
+static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz)
+{
     // Boot-gate trigger -- same 10ms active-low pulse main.cpp uses. The
     // STM blocks at boot until it sees this, regardless of what firmware
     // mode it's running.
@@ -160,17 +152,15 @@ int main(int argc, char **argv)
         }
     }
 
-    close(fd);
-    lgGpiochipClose(gpio_h);
-
     if (samples.empty())
     {
-        fprintf(stderr, "no valid frames captured\n");
-        return 1;
+        fprintf(stderr, "no valid frames captured (%u torn) -- was the STM freshly "
+                        "flashed with a build that sends TelemetryFrame?\n", torn_frames);
+        return -1;
     }
 
     FILE *csv = fopen(OUT_CSV, "w");
-    if (!csv) { perror("fopen csv"); return 1; }
+    if (!csv) { perror("fopen csv"); return -1; }
 
     fprintf(csv, "host_time_s,pos_cmd,pos_fbk,vel_cmd,vel_fbk,timestamp_ms,"
                  "drive_state,fault_flags,samples_consumed,iq_cmd,i_q_fbk\n");
@@ -183,10 +173,54 @@ int main(int argc, char **argv)
                 f.iq_cmd, f.i_q_fbk);
     }
     fclose(csv);
-    printf("wrote %s\n", OUT_CSV);
+    printf("wrote %s (%u torn frames)\n", OUT_CSV, torn_frames);
 
     int rc = system("python3 " PLOT_SCRIPT);
     (void)rc;
 
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    const char *dev      = (argc > 1) ? argv[1] : DEFAULT_DEV;
+    uint32_t    speed_hz = (argc > 2) ? static_cast<uint32_t>(strtoul(argv[2], nullptr, 0))
+                                       : DEFAULT_SPEED_HZ;
+
+    static_assert(sizeof(TelemetryFrame) == FRAME_LEN, "TelemetryFrame must be 32 bytes");
+
+    std::signal(SIGINT, sigint_handler);
+
+    int gpio_h = lgGpiochipOpen(0);
+    if (gpio_h < 0) { fprintf(stderr, "lgGpiochipOpen failed\n"); return 1; }
+
+    lgGpioFree(gpio_h, PIN_FIRE_SYSID);
+    if (lgGpioClaimOutput(gpio_h, 0, PIN_FIRE_SYSID, 1) < 0)
+    {
+        fprintf(stderr, "lgGpioClaimOutput failed\n");
+        lgGpiochipClose(gpio_h);
+        return 1;
+    }
+
+    int fd = spi_open_configure(dev, speed_hz);
+    if (fd < 0) { lgGpiochipClose(gpio_h); return 1; }
+
+    printf("device : %s\nspeed  : %u Hz\ntimeout: %.1f s\n", dev, speed_hz, TIMEOUT_SECONDS);
+
+    // Re-arms after every capture instead of exiting -- flash/reset the STM
+    // for the next test, then hit Enter here when it's booted and ready.
+    // Same idiom as main.cpp's own capture loop.
+    while (g_run)
+    {
+        if (!wait_for_enter("Press Enter once the STM is flashed and ready "
+                            "for the next test (Ctrl+C to exit): "))
+            break;
+        if (!g_run) break;
+
+        capture_one_move(fd, gpio_h, speed_hz);
+    }
+
+    close(fd);
+    lgGpiochipClose(gpio_h);
     return 0;
 }
