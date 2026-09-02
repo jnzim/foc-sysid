@@ -236,9 +236,11 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
 int main(int argc, char **argv)
 {
     // Usage: move_telem [target_pos] [vel_max] [accel_max] [dev] [speed_hz]
-    // First three are counts / counts/s / counts/s^2 (the wire units) --
-    // defaults match the values this move was bench-verified with under
-    // the boot-scaffolding version of this test.
+    // First three are counts / counts/s / counts/s^2 (the wire units).
+    // target_pos is RELATIVE to wherever the stage is when the move
+    // starts -- sending the same command twice moves twice, it does not
+    // repeat the same absolute destination. Default matches the values
+    // this move was bench-verified with.
     int32_t     target_pos = (argc > 1) ? static_cast<int32_t>(strtol(argv[1], nullptr, 0)) : 3900;
     int32_t     vel_max    = (argc > 2) ? static_cast<int32_t>(strtol(argv[2], nullptr, 0)) : 3900;
     int32_t     accel_max  = (argc > 3) ? static_cast<int32_t>(strtol(argv[3], nullptr, 0)) : 13000;

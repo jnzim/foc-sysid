@@ -93,7 +93,9 @@ typedef struct __attribute__((packed)) {
  * Structure:
  *   [0]      opcode (0x07 = MOVE_CMD)
  *   [1]      seq
- *   [2..5]   target_pos (int32, counts, relative to post-ALIGN zero)
+ *   [2..5]   target_pos (int32, counts, RELATIVE to wherever the stage
+ *            actually is when the move starts -- a delta, not an absolute
+ *            position. Sending the same MoveCmd twice moves twice.)
  *   [6..9]   vel_max    (int32, counts/s, magnitude)
  *   [10..13] accel_max  (int32, counts/s^2, magnitude)
  *   [14..15] crc16 (covers bytes 0..13)
@@ -103,7 +105,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint8_t  opcode;       /* 1 */
     uint8_t  seq;          /* 1 */
-    int32_t  target_pos;   /* 4 */
+    int32_t  target_pos;   /* 4 -- delta from current position, see above */
     int32_t  vel_max;      /* 4 */
     int32_t  accel_max;    /* 4 */
     uint16_t crc16;        /* 2 */
