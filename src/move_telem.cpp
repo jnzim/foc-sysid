@@ -342,6 +342,30 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
     return 0;
 }
 
+// If MOVE_CMD_FILE exists and parses as three whitespace-separated numbers
+// (target_mm vel_mm_s accel_mm_s2), use those -- same file/format the old
+// pre-rebuild tool used, so editing it (no rebuild needed) is how you
+// change the move when launching via a task/shortcut that can't pass CLI
+// args (e.g. VS Code's Cmd+Shift+B, which always runs this with none).
+#define MOVE_CMD_FILE "../move_cmd.txt"
+
+static bool read_move_cmd_file(double *target_mm, double *vel_mm_s, double *accel_mm_s2)
+{
+    FILE *f = fopen(MOVE_CMD_FILE, "r");
+    if (!f) return false;
+
+    int n = fscanf(f, "%lf %lf %lf", target_mm, vel_mm_s, accel_mm_s2);
+    fclose(f);
+
+    if (n != 3)
+    {
+        fprintf(stderr, "%s: expected 3 numbers (target_mm vel_mm_s accel_mm_s2), got %d -- ignoring\n",
+                MOVE_CMD_FILE, n);
+        return false;
+    }
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     // Usage: move_telem [target_mm] [vel_mm_s] [accel_mm_s2] [dev] [speed_hz]
@@ -350,9 +374,20 @@ int main(int argc, char **argv)
     // the move starts -- sending the same command twice moves twice, it
     // does not repeat the same absolute destination. Defaults match the
     // "gentle first test" scale used elsewhere on this project.
-    double target_mm    = (argc > 1) ? strtod(argv[1], nullptr) : 0.3;
-    double vel_mm_s      = (argc > 2) ? strtod(argv[2], nullptr) : 1.0;
-    double accel_mm_s2   = (argc > 3) ? strtod(argv[3], nullptr) : 5.0;
+    //
+    // If run with no arguments at all, MOVE_CMD_FILE is checked first --
+    // CLI args (when given) always take priority over the file.
+    double target_mm  = 0.3;
+    double vel_mm_s    = 1.0;
+    double accel_mm_s2 = 5.0;
+
+    if (argc == 1 && read_move_cmd_file(&target_mm, &vel_mm_s, &accel_mm_s2))
+        printf("using %s: target=%.3f vel=%.3f accel=%.3f\n",
+               MOVE_CMD_FILE, target_mm, vel_mm_s, accel_mm_s2);
+
+    if (argc > 1) target_mm    = strtod(argv[1], nullptr);
+    if (argc > 2) vel_mm_s     = strtod(argv[2], nullptr);
+    if (argc > 3) accel_mm_s2  = strtod(argv[3], nullptr);
     const char *dev      = (argc > 4) ? argv[4] : DEFAULT_DEV;
     uint32_t    speed_hz = (argc > 5) ? static_cast<uint32_t>(strtoul(argv[5], nullptr, 0))
                                        : DEFAULT_SPEED_HZ;
