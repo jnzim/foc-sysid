@@ -18,6 +18,7 @@
 // DRIVE_IDLE. No magic numbers, no test_id markers -- just the real state.
 
 #include <cerrno>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -343,24 +344,36 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
 
 int main(int argc, char **argv)
 {
-    // Usage: move_telem [target_pos] [vel_max] [accel_max] [dev] [speed_hz]
-    // First three are counts / counts/s / counts/s^2 (the wire units).
-    // target_pos is RELATIVE to wherever the stage is when the move
-    // starts -- sending the same command twice moves twice, it does not
-    // repeat the same absolute destination. Default matches the values
-    // this move was bench-verified with.
-    int32_t     target_pos = (argc > 1) ? static_cast<int32_t>(strtol(argv[1], nullptr, 0)) : 3900;
-    int32_t     vel_max    = (argc > 2) ? static_cast<int32_t>(strtol(argv[2], nullptr, 0)) : 3900;
-    int32_t     accel_max  = (argc > 3) ? static_cast<int32_t>(strtol(argv[3], nullptr, 0)) : 13000;
-    const char *dev        = (argc > 4) ? argv[4] : DEFAULT_DEV;
-    uint32_t    speed_hz   = (argc > 5) ? static_cast<uint32_t>(strtoul(argv[5], nullptr, 0))
-                                         : DEFAULT_SPEED_HZ;
+    // Usage: move_telem [target_mm] [vel_mm_s] [accel_mm_s2] [dev] [speed_hz]
+    // Physical units in, counts out -- 2mm screw pitch, 8192 counts/rev ->
+    // 4096 counts/mm. target_mm is RELATIVE to wherever the stage is when
+    // the move starts -- sending the same command twice moves twice, it
+    // does not repeat the same absolute destination. Defaults match the
+    // "gentle first test" scale used elsewhere on this project.
+    double target_mm    = (argc > 1) ? strtod(argv[1], nullptr) : 0.3;
+    double vel_mm_s      = (argc > 2) ? strtod(argv[2], nullptr) : 1.0;
+    double accel_mm_s2   = (argc > 3) ? strtod(argv[3], nullptr) : 5.0;
+    const char *dev      = (argc > 4) ? argv[4] : DEFAULT_DEV;
+    uint32_t    speed_hz = (argc > 5) ? static_cast<uint32_t>(strtoul(argv[5], nullptr, 0))
+                                       : DEFAULT_SPEED_HZ;
 
-    if (vel_max <= 0 || accel_max <= 0)
+    if (vel_mm_s <= 0.0 || accel_mm_s2 <= 0.0)
     {
-        fprintf(stderr, "vel_max and accel_max must be > 0\n");
+        fprintf(stderr, "vel_mm_s and accel_mm_s2 must be > 0\n");
         return 1;
     }
+
+    static const double SCREW_PITCH_MM = 2.0;
+    static const double ENCODER_CPR    = 8192.0;
+    static const double COUNTS_PER_MM  = ENCODER_CPR / SCREW_PITCH_MM;   // 4096
+
+    int32_t target_pos = static_cast<int32_t>(lround(target_mm  * COUNTS_PER_MM));
+    int32_t vel_max     = static_cast<int32_t>(lround(vel_mm_s   * COUNTS_PER_MM));
+    int32_t accel_max   = static_cast<int32_t>(lround(accel_mm_s2 * COUNTS_PER_MM));
+
+    printf("target: %.3f mm (%d counts)   vel_max: %.3f mm/s (%d counts/s)   "
+           "accel_max: %.3f mm/s^2 (%d counts/s^2)\n",
+           target_mm, target_pos, vel_mm_s, vel_max, accel_mm_s2, accel_max);
 
     static_assert(sizeof(TelemetryFrame) == FRAME_LEN, "TelemetryFrame must be 32 bytes");
 
