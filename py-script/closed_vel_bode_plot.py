@@ -24,12 +24,29 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.optimize import curve_fit
 from scipy.signal import coherence, csd, welch, detrend
 
 ENCODER_CPR = 8192.0
 FLAG_RUN = 1
-SETTLE_TIME_S = 4.0          # discard settle transient at the start of RUN
+SETTLE_TIME_S = 2.0          # discard settle transient at the start of RUN
 POSITION_LOOP_DECADE = 10.0  # rule of thumb: outer crossover 1 decade below inner BW
+
+# Velocity loop gains actually flashed for this run (loops.c VEL_KP/VEL_KI).
+# When VEL_KI_TEST=0, C(s)=VEL_KP_TEST is a real constant and the plant can
+# be divided out directly (P(s)=L(s)/VEL_KP_TEST). When it's nonzero (a
+# real PI is under test, not the P-only plant-ID trick), that division is
+# invalid -- C(s) is frequency-dependent -- so the plant back-out below is
+# skipped automatically; only the loop's own backed-out margin (gc/PM/GM,
+# which needs no knowledge of C(s) at all) is computed in that case.
+VEL_KP_TEST = 0.02053   # A / (rad/s)
+VEL_KI_TEST = 1.6505    # A / rad -- 0.0 for a P-only plant-ID run
+
+
+def first_order_complex(f, K, tau):
+    w = 2.0 * np.pi * f
+    Hm = K / (1j * w * tau + 1.0)
+    return np.concatenate([Hm.real, Hm.imag])
 
 
 def parse_flags(series):
@@ -105,17 +122,6 @@ f_coh, Cxy  = coherence(cmd_ac, meas_ac, fs=fs, nperseg=nperseg)
 
 H = S_cm / (S_cc + 1e-30)   # closed-loop H(f) = vel_meas / vel_cmd
 
-# ── Back out the raw mechanical plant P(s) = vel/iq from the CLOSED-loop
-# measurement, since C(s) (the deployed velocity PI) is known:
-#   H = C*P / (1 + C*P)  ->  P = H / (C*(1-H))
-# Safe alternative to the open-loop iq chirp -- velocity stays regulated by
-# the closed loop the whole time, so there's no back-EMF runaway risk.
-VEL_KP = 0.0239   # A / (rad/s) -- must match deployed loops.c VEL_KP
-VEL_KI = 0.1935   # A / rad     -- must match deployed loops.c VEL_KI
-w_csd = 2.0 * np.pi * f_csd
-C_ctrl = VEL_KP + VEL_KI / (1j * w_csd + 1e-30)
-P_mech = H / (C_ctrl * (1.0 - H) + 1e-30)
-
 mag_db    = 20.0 * np.log10(np.abs(H) + 1e-30)
 phase_deg = np.degrees(np.unwrap(np.angle(H)))
 
@@ -138,28 +144,6 @@ f_bw = interp_log_x_for_y(f_csd[good], mag_good, mag_3db)
 
 print(f"\nClosed velocity loop -- H(s) = vel_meas / vel_cmd")
 print(f"  DC gain (ref)   : {mag_dc:.2f} dB")
-
-# Linear least-squares fit of 1/P = 1/K + j*w*(tau/K) over the good bins --
-# same first-order plant model as bode_vel_plot.py, just derived from the
-# closed-loop data instead of an open-loop chirp.
-if np.any(good):
-    w_good = w_csd[good]
-    inv_P = 1.0 / (P_mech[good] + 1e-30)
-    A = np.column_stack([np.ones_like(w_good), w_good])
-    b_re = inv_P.real
-    b_im = inv_P.imag
-    b_stack = np.concatenate([b_re, b_im])
-    A_full = np.zeros((2 * len(w_good), 2))
-    A_full[:len(w_good), 0] = 1.0
-    A_full[len(w_good):, 1] = w_good
-    x, *_ = np.linalg.lstsq(A_full, b_stack, rcond=None)
-    inv_K, tau_over_K = x
-    K_fit = 1.0 / inv_K
-    tau_fit = tau_over_K * K_fit
-    print(f"\nMechanical plant backed out of closed-loop data -- P(s) = vel/iq:")
-    print(f"  K (gain)    = {K_fit:.3f}  rad/s per A")
-    print(f"  tau         = {tau_fit*1000.0:.2f} ms  ->  fc_plant = {1.0/(2.0*np.pi*tau_fit):.2f} Hz")
-    print(f"  (cross-check against bode_vel_plot.py's open-loop fit)")
 if f_bw is not None:
     print(f"  -3dB bandwidth  : {f_bw:.2f} Hz")
     kp_pos = 2.0 * np.pi * (f_bw / POSITION_LOOP_DECADE)
@@ -171,6 +155,94 @@ if f_bw is not None:
 else:
     print("  -3dB bandwidth  : not found in swept range -- widen CL_VEL_CHIRP_F_END")
     kp_pos = None
+
+# ---------------------------------------------------------------------------
+# Back out the real open-loop L(s) = C(s)*P(s) from this closed-loop
+# measurement -- valid regardless of what C(s) is, P-only or full PI:
+#   H = L/(1+L)  =>  L = H/(1-H)      (same identity as the current loop)
+# This is the loop's own real margin, directly comparable to the design's
+# by-construction prediction (gc=BW_TARGET_HZ, PM=90deg for a pure-integrator
+# zero-cancellation design) -- independent of the plant-backout step below.
+#
+# Same numerical trap as the current loop's L=H/(1-H): near DC a
+# well-tracking loop has H->1, so (1-H)->0 and its phase is noise-dominated.
+# Gate out bins where |1-H| is too small before trusting phase there.
+# ---------------------------------------------------------------------------
+COND_MIN_ONE_MINUS_H = 0.1
+
+one_minus_H = 1.0 - H
+plant_phase_ok = good & (np.abs(one_minus_H) > COND_MIN_ONE_MINUS_H)
+
+if np.any(plant_phase_ok):
+    f_plant_ok = f_csd[plant_phase_ok]
+    L_vel = H[plant_phase_ok] / one_minus_H[plant_phase_ok]
+
+    loop_mag_db = 20.0 * np.log10(np.abs(L_vel) + 1e-30)
+    loop_phase_deg = np.degrees(np.unwrap(np.angle(L_vel)))
+    f_gc_loop = interp_log_x_for_y(f_plant_ok, loop_mag_db, 0.0)
+    print(f"\nVelocity loop's own backed-out margin -- L(s) = H(s)/(1-H(s)):")
+    if f_gc_loop is not None:
+        phase_at_gc_loop = np.interp(np.log10(f_gc_loop), np.log10(f_plant_ok), loop_phase_deg)
+        pm_loop = 180.0 + phase_at_gc_loop
+        print(f"  gain crossover  : {f_gc_loop:.2f} Hz")
+        print(f"  phase margin    : {pm_loop:.1f} deg")
+    else:
+        print("  gain crossover  : not found in coherent range")
+    f_pc_loop = interp_log_x_for_y(f_plant_ok, loop_phase_deg, -180.0)
+    if f_pc_loop is not None:
+        mag_at_pc_loop = np.interp(np.log10(f_pc_loop), np.log10(f_plant_ok), loop_mag_db)
+        print(f"  phase crossover : {f_pc_loop:.2f} Hz")
+        print(f"  gain margin     : {-mag_at_pc_loop:.1f} dB")
+    else:
+        print("  phase crossover : not found -- phase never reaches -180 deg, GM effectively infinite")
+
+if VEL_KI_TEST != 0.0:
+    print(f"\nBacked-out mechanical plant: skipped -- C(s) is a full PI here "
+          f"(VEL_KI_TEST={VEL_KI_TEST}), not a real constant, so P(s)=L(s)/C "
+          f"can't be done with a plain scalar division. Use a P-only run for this.")
+    plant_fit_ok = False
+elif np.any(plant_phase_ok):
+    L_vel_p = L_vel
+    P_vel = L_vel_p / VEL_KP_TEST
+
+    plant_mag_db = 20.0 * np.log10(np.abs(P_vel) + 1e-30)
+    plant_phase_deg = np.degrees(np.unwrap(np.angle(P_vel)))
+
+    print(f"\nBacked-out mechanical plant -- P(s) = L(s)/VEL_KP_TEST, VEL_KP_TEST={VEL_KP_TEST}:")
+
+    if len(f_plant_ok) >= 5:
+        y_fit = np.concatenate([P_vel.real, P_vel.imag])
+        K0 = float(np.abs(P_vel[np.argmin(f_plant_ok)]))
+        try:
+            popt, _ = curve_fit(first_order_complex, f_plant_ok, y_fit,
+                                 p0=[K0, 1.0 / (2 * np.pi * 20.0)], maxfev=20_000)
+            K_backed, tau_backed = popt
+            tau_backed = abs(tau_backed)
+            fc_backed = 1.0 / (2.0 * np.pi * tau_backed)
+            print(f"  K   = {K_backed:.3f} rad/s per A")
+            print(f"  tau = {tau_backed*1000:.2f} ms  ->  fc = {fc_backed:.2f} Hz")
+
+            # Cross-check against the open-loop chirp fit from this same
+            # bare-motor setup (SYSID_TEST_VEL_CHIRP, >=10.5Hz only,
+            # 0.256A run): K=57.978 rad/s/A, tau=4.10ms, fc=38.84Hz.
+            K_OL, TAU_OL_MS, FC_OL = 57.978, 4.10, 38.84
+            print(f"\n  vs. open-loop chirp fit (same bare motor, 0.256A, >=10.5Hz):")
+            print(f"  K   : backed-out {K_backed:.3f}  vs  OL {K_OL:.3f}  "
+                  f"({(K_backed/K_OL - 1)*100:+.0f}%)")
+            print(f"  tau : backed-out {tau_backed*1000:.2f}ms  vs  OL {TAU_OL_MS:.2f}ms  "
+                  f"({(tau_backed*1000/TAU_OL_MS - 1)*100:+.0f}%)")
+            print(f"  fc  : backed-out {fc_backed:.2f}Hz  vs  OL {FC_OL:.2f}Hz  "
+                  f"({(fc_backed/FC_OL - 1)*100:+.0f}%)")
+            plant_fit_ok = True
+        except RuntimeError as exc:
+            print(f"  fit failed: {exc}")
+            plant_fit_ok = False
+    else:
+        print(f"  too few conditioned bins ({len(f_plant_ok)}) to fit")
+        plant_fit_ok = False
+else:
+    print("\nBacked-out plant: no bins pass the |1-H| conditioning gate -- can't trust phase here")
+    plant_fit_ok = False
 
 # ---------------------------------------------------------------------------
 # Phase-margin-targeted design -- less conservative than the decade-below-BW

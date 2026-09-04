@@ -35,7 +35,7 @@
 
 #define SYSID_FRAME_LEN     32
 #define DEFAULT_DEV         "/dev/spidev0.0"
-#define DEFAULT_SPEED_HZ    4000000u
+#define DEFAULT_SPEED_HZ    1000000u
 // Read loop was issuing back-to-back SPI transactions as fast as the bus
 // and kernel driver allowed (no pacing at all) -- at 4MHz/32B that's on the
 // order of 10+ kHz of CS toggles, each one firing the STM's highest-priority
@@ -62,6 +62,7 @@
 #define SYSID_TEST_CURRENT_LOOP_CHIRP  0u
 #define SYSID_TEST_CURRENT_LOOP_STEP   1u
 #define SYSID_TEST_VEL_CHIRP           2u
+#define SYSID_TEST_CL_CURRENT_CHIRP    3u
 #define SYSID_TEST_CL_VEL_STEP         4u
 #define SYSID_TEST_RIPPLE_DEBUG        5u
 #define SYSID_TEST_CL_VEL_CHIRP        6u
@@ -345,6 +346,8 @@ static std::vector<const char *> plot_scripts_for_test(uint16_t test_id)
             return { "../py-script/step.py" };
         case SYSID_TEST_VEL_CHIRP:
             return { "../py-script/bode_vel_plot.py", "../py-script/vel_v_t.py" };
+        case SYSID_TEST_CL_CURRENT_CHIRP:
+            return { "../py-script/closed_current_bode_plot.py" };
         case SYSID_TEST_CL_VEL_STEP:
             return { "../py-script/velocity_step_plot.py" };
         case SYSID_TEST_RIPPLE_DEBUG:
