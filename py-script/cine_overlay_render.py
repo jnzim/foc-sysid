@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 ENCODER_CPR = 8192.0
+VEL_TELEM_DIV = 8.0  # firmware sends vel_meas_counts / VEL_TELEM_DIV as int16
 FLAG_RUN = 1
 SETTLE_TIME_S = 1.2     # trim the firmware's 1s hold-at-zero before the sweep starts
 FPS = 30.0
@@ -77,7 +78,7 @@ duration = t_raw[-1]
 pos_cmd_deg  = np.degrees(df["sysid_f"].to_numpy(dtype=np.float64) / 1000.0)
 pos_meas_deg = np.degrees(df["iq_cmd_mA"].to_numpy(dtype=np.float64) / 1000.0)
 vel_cmd      = df["enc_hi_raw"].to_numpy(dtype=np.float64) / 1000.0                       # rad/s
-vel_meas     = df["enc_lo_raw"].to_numpy(dtype=np.float64) * (2.0 * np.pi / ENCODER_CPR)  # rad/s
+vel_meas     = df["enc_lo_raw"].to_numpy(dtype=np.float64) * VEL_TELEM_DIV * (2.0 * np.pi / ENCODER_CPR)  # rad/s
 
 print(f"duration    : {duration:.1f} s")
 print(f"pos_cmd     : {pos_cmd_deg.min():+.1f} to {pos_cmd_deg.max():+.1f} deg")

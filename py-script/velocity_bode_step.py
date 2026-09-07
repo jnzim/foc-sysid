@@ -27,6 +27,7 @@ from scipy.signal import savgol_filter
 # Configuration
 # ---------------------------------------------------------------------------
 ENCODER_CPR    = 8192.0
+VEL_TELEM_DIV  = 8.0  # firmware sends vel_meas_counts / VEL_TELEM_DIV as int16
 SAVGOL_WINDOW  = 15
 SAVGOL_ORDER   = 3
 
@@ -111,7 +112,7 @@ fs = 1.0 / np.median(np.diff(t))
 
 # Decode velocity signals from repurposed slots
 vel_cmd_raw  = df["sysid_f"].to_numpy(dtype=np.float64) / 1000.0        # mrad/s → rad/s
-vel_meas_raw = df["iq_cmd_mA"].to_numpy(dtype=np.float64) * (2.0 * np.pi / ENCODER_CPR)
+vel_meas_raw = df["iq_cmd_mA"].to_numpy(dtype=np.float64) * VEL_TELEM_DIV * (2.0 * np.pi / ENCODER_CPR)
 vel_meas     = smooth(vel_meas_raw)
 
 # Standard signals

@@ -28,6 +28,7 @@ from scipy.optimize import curve_fit
 from scipy.signal import coherence, csd, welch, detrend
 
 ENCODER_CPR = 8192.0
+VEL_TELEM_DIV = 8.0  # firmware sends vel_meas_counts / VEL_TELEM_DIV as int16
 FLAG_RUN = 1
 SETTLE_TIME_S = 2.0          # discard settle transient at the start of RUN
 POSITION_LOOP_DECADE = 10.0  # rule of thumb: outer crossover 1 decade below inner BW
@@ -39,8 +40,8 @@ POSITION_LOOP_DECADE = 10.0  # rule of thumb: outer crossover 1 decade below inn
 # invalid -- C(s) is frequency-dependent -- so the plant back-out below is
 # skipped automatically; only the loop's own backed-out margin (gc/PM/GM,
 # which needs no knowledge of C(s) at all) is computed in that case.
-VEL_KP_TEST = 0.02053   # A / (rad/s)
-VEL_KI_TEST = 1.6505    # A / rad -- 0.0 for a P-only plant-ID run
+VEL_KP_TEST = 0.0239    # A / (rad/s) -- P-only override, CL_VEL_CHIRP_PONLY_KP, stage attached
+VEL_KI_TEST = 0.0
 
 
 def first_order_complex(f, K, tau):
@@ -104,7 +105,7 @@ if np.any(dt_arr <= 0):
 fs = 1.0 / np.median(dt_arr)
 
 vel_cmd  = df["sysid_f"].to_numpy(dtype=np.float64) / 1000.0                       # rad/s
-vel_meas = df["iq_cmd_mA"].to_numpy(dtype=np.float64) * (2.0 * np.pi / ENCODER_CPR)  # rad/s
+vel_meas = df["iq_cmd_mA"].to_numpy(dtype=np.float64) * VEL_TELEM_DIV * (2.0 * np.pi / ENCODER_CPR)  # rad/s
 
 print(f"samples     : {len(df)}")
 print(f"sample rate : {fs:.1f} Hz")

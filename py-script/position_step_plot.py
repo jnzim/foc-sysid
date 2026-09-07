@@ -103,6 +103,7 @@ csv_path = Path(sys.argv[1]).resolve()
 out_path = csv_path.parent / "position_step_plot.png"
 
 ENCODER_CPR = 8192.0
+VEL_TELEM_DIV = 8.0  # firmware sends vel_meas_counts / VEL_TELEM_DIV as int16
 
 df = pd.read_csv(csv_path)
 required = ["host_time_s", "flags", "sysid_f", "iq_cmd_mA", "iq_mA", "vq_mV", "dt",
@@ -126,7 +127,7 @@ iq_meas  = df["iq_mA"].to_numpy(dtype=np.float64)
 vq_mV    = df["vq_mV"].to_numpy(dtype=np.float64)
 
 vel_cmd  = df["enc_hi_raw"].to_numpy(dtype=np.float64) / 1000.0                       # rad/s
-vel_meas = df["enc_lo_raw"].to_numpy(dtype=np.float64) * (2.0 * np.pi / ENCODER_CPR)  # rad/s
+vel_meas = df["enc_lo_raw"].to_numpy(dtype=np.float64) * VEL_TELEM_DIV * (2.0 * np.pi / ENCODER_CPR)  # rad/s
 
 print(f"samples   : {len(df)}")
 print(f"pos_cmd   : {pos_cmd.min():+.4f} to {pos_cmd.max():+.4f} rad")
@@ -159,7 +160,9 @@ for i in range(1, len(bounds) - 1):
         f"settle={m['settling_time_s']*1000:.1f} ms"
     )
 
-fig, (ax_pos, ax_vel, ax_iq, ax_vq) = plt.subplots(4, 1, figsize=(12, 13), sharex=True)
+pos_err_deg = np.degrees(pos_cmd - pos_meas)
+
+fig, (ax_pos, ax_err, ax_vel, ax_iq, ax_vq) = plt.subplots(5, 1, figsize=(12, 15), sharex=True)
 
 ax_pos.plot(t, np.degrees(pos_cmd), "--", color="C1", linewidth=1.4, label="pos_cmd")
 ax_pos.plot(t, np.degrees(pos_meas), color="C0", linewidth=1.0, label="pos_meas")
@@ -167,6 +170,11 @@ ax_pos.set_ylabel("Position (deg)")
 ax_pos.set_title("Position Loop Step Response")
 ax_pos.legend()
 ax_pos.grid(True, alpha=0.3)
+
+ax_err.plot(t, pos_err_deg, color="C4", linewidth=0.8)
+ax_err.axhline(0.0, color="gray", linewidth=0.8, linestyle=":")
+ax_err.set_ylabel("Position error (deg)")
+ax_err.grid(True, alpha=0.3)
 
 ax_vel.plot(t, vel_cmd, "--", color="C1", linewidth=1.0, label="vel_cmd (P output)")
 ax_vel.plot(t, vel_meas, color="C0", linewidth=0.8, label="vel_meas")
