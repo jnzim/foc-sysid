@@ -45,7 +45,14 @@
 // loop ID is done, so we don't need 10kHz+ telemetry -- throttling the host
 // read rate down to 5kHz gives the STM's IRQ priorities enough breathing
 // room between transactions.
-#define TARGET_FRAME_RATE_HZ  10000.0
+/* 2 kHz, not 10 kHz (2026-09-19). At 1 MHz a 32-byte transaction occupies
+ * 256us; pacing at 10 kHz meant the Pi issued them back-to-back and the bus was
+ * busy ~88% of the time. The firmware only rewrites its TX buffer while NSS is
+ * idle (spi.c), so it almost never got a chance: telemetry updated 344 times a
+ * second and 90% of captured frames were repeats. At 2 kHz the period is 500us
+ * with ~244us idle, so the 20 kHz control loop lands in the gap about half its
+ * ticks, and every captured frame is distinct. */
+#define TARGET_FRAME_RATE_HZ  2000.0
 // "latest" is overwritten every run — no digging through old plots to find
 // the one from the test you just ran. Move out anything you want to keep.
 #define DEFAULT_OUTDIR      "../drive_data/latest"
@@ -72,8 +79,14 @@
 
 static volatile sig_atomic_t g_run = 1;
 
+/* Field order must match the firmware's Include/protocol.h exactly.
+ * pad/flags lead because they are constant or near-constant: the STM32's SPI
+ * keeps a byte fetched ahead, so a leading byte can be stale, and a constant
+ * byte cannot tear. crc is last and covers bytes 0..29. */
 struct __attribute__((packed)) SysIdSample
 {
+    uint16_t pad;
+    uint16_t flags;
     uint32_t t;
     int16_t  enc_hi;
     int16_t  enc_lo;
@@ -86,9 +99,7 @@ struct __attribute__((packed)) SysIdSample
     int16_t  ia_mA;
     int16_t  ib_mA;
     int16_t  iq_cmd_mA;
-    uint16_t flags;
     uint16_t crc;
-    uint16_t pad;
 };
 
 static_assert(sizeof(SysIdSample) == 32);
@@ -151,21 +162,21 @@ static uint32_t get_u32_le(const uint8_t *p)
 static SysIdSample decode_sysid_sample(const uint8_t rx[SYSID_FRAME_LEN])
 {
     SysIdSample s{};
-    s.t          = get_u32_le(&rx[0]);
-    s.enc_hi     = get_s16_le(&rx[4]);
-    s.enc_lo     = get_s16_le(&rx[6]);
-    s.sysid_f    = get_s16_le(&rx[8]);
-    s.id_mA      = get_s16_le(&rx[10]);
-    s.iq_mA      = get_s16_le(&rx[12]);
-    s.vd_mV      = get_s16_le(&rx[14]);
-    s.vq_mV      = get_s16_le(&rx[16]);
-    s.theta_mrad = get_s16_le(&rx[18]);
-    s.ia_mA      = get_s16_le(&rx[20]);
-    s.ib_mA      = get_s16_le(&rx[22]);
-    s.iq_cmd_mA  = get_s16_le(&rx[24]);
-    s.flags      = get_u16_le(&rx[26]);
-    s.crc        = get_u16_le(&rx[28]);
-    s.pad        = get_u16_le(&rx[30]);
+    s.pad        = get_u16_le(&rx[0]);
+    s.flags      = get_u16_le(&rx[2]);
+    s.t          = get_u32_le(&rx[4]);
+    s.enc_hi     = get_s16_le(&rx[8]);
+    s.enc_lo     = get_s16_le(&rx[10]);
+    s.sysid_f    = get_s16_le(&rx[12]);
+    s.id_mA      = get_s16_le(&rx[14]);
+    s.iq_mA      = get_s16_le(&rx[16]);
+    s.vd_mV      = get_s16_le(&rx[18]);
+    s.vq_mV      = get_s16_le(&rx[20]);
+    s.theta_mrad = get_s16_le(&rx[22]);
+    s.ia_mA      = get_s16_le(&rx[24]);
+    s.ib_mA      = get_s16_le(&rx[26]);
+    s.iq_cmd_mA  = get_s16_le(&rx[28]);
+    s.crc        = get_u16_le(&rx[30]);
     return s;
 }
 
