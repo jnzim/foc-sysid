@@ -41,7 +41,10 @@ SETTLE_TIME_S = 2.0   # discard settle transient at the start of RUN
 # Design-by-construction numbers this test exists to check (see config.h
 # CURRENT_LOOP_KP/KI comment) -- not used in any calculation below, printed
 # only as a reference to compare the measured result against.
-DESIGN_BW_HZ = 500.0
+# 250 Hz, not the 500 Hz this used to carry: 500 was a stale label from before
+# the project corrected its current-loop target down, and it made every run
+# print "design target: 500 Hz" next to a perfectly on-target measurement.
+DESIGN_BW_HZ = 250.0
 DESIGN_PM_DEG_LO = 85.0
 DESIGN_PM_DEG_HI = 88.0
 
@@ -51,13 +54,15 @@ DESIGN_PM_DEG_HI = 88.0
 DEPLOYED_KP = 2.07       # V/A
 DEPLOYED_KI = 2450.0     # V/(A*s)
 
-# Plant fit config.h's CURRENT_LOOP_KP/KI comment cites as "the real" current
-# best estimate ("...against the real (now 1.67/1.41mH) plant fit"). Not
-# re-fit in this script -- this test is closed-loop (iq_cmd->iq_meas), it
-# has no open-loop Vd/id data of its own to fit R/L from. See bode_plot.py
-# for the open-loop plant identification these numbers came from.
-PLANT_R = 1.67           # ohm, per-phase
-PLANT_L = 1.41e-3        # H, per-phase
+# Open-loop plant fit. Not re-fit here -- this test is closed-loop
+# (iq_cmd->iq_meas) and has no open-loop data of its own; see bode_plot.py.
+#
+# Updated 2026-09-19 from 1.67 ohm / 1.41 mH: those came from captures taken
+# before the ADC sample-timing fix (drive 3720707) and before the telemetry
+# frame corruption was fixed (drive 7ec52fb). Re-measured on a verified path:
+# drive_data/archive/ol_current_chirp_fixed_2026-09-19.csv.
+PLANT_R = 1.479          # ohm, per-phase
+PLANT_L = 1.327e-3       # H, per-phase
 
 
 def zero_cancel_pi(bw_hz, R, L):
