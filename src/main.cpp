@@ -124,6 +124,7 @@ struct CaptureStats
     uint32_t zero_dt_count = 0;
     uint32_t big_dt_count  = 0;
     uint32_t torn_frames   = 0;
+    uint32_t resyncs       = 0;   // frame-alignment recoveries (see spi_shift_bytes)
 };
 
 static void sigint_handler(int sig) { (void)sig; g_run = 0; }
@@ -216,6 +217,35 @@ static int spi_open_configure(const char *dev, uint32_t speed_hz)
     }
     return fd;
 }
+
+// Shift the frame boundary by n bytes.
+//
+// The STM32's TX DMA free-runs in a circle over one frame and the Pi clocks 32
+// bytes per transaction, so the two stay in step only as long as no clock edge
+// is ever lost. Lose one and every later frame is read at the wrong offset --
+// permanently, because nothing re-synchronises the stream. That is what "the
+// capture dies partway through and never recovers" was: on 2026-09-19 a
+// position chirp ran 99.5% torn with test_id decoding as 256 instead of 8,
+// i.e. misaligned rather than noisy.
+//
+// Clocking n extra bytes rotates our window onto the frame; walking one byte
+// at a time is guaranteed to find the right offset within 31 tries.
+static int spi_shift_bytes(int fd, uint32_t speed_hz, int n)
+{
+    uint8_t tx[SYSID_FRAME_LEN]{};
+    uint8_t rx[SYSID_FRAME_LEN]{};
+
+    spi_ioc_transfer tr{};
+    tr.tx_buf        = reinterpret_cast<unsigned long>(tx);
+    tr.rx_buf        = reinterpret_cast<unsigned long>(rx);
+    tr.len           = static_cast<uint32_t>(n);
+    tr.speed_hz      = speed_hz;
+    tr.bits_per_word = 8;
+    tr.delay_usecs   = 0;
+
+    return (ioctl(fd, SPI_IOC_MESSAGE(1), &tr) < 1) ? -1 : 0;
+}
+
 
 static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[SYSID_FRAME_LEN])
 {
@@ -339,7 +369,8 @@ static void print_summary(const CaptureStats *stats, double elapsed_s,
                 avg_dt, stats->max_dt);
     std::printf("dt == 0 count        : %u\n",   stats->zero_dt_count);
     std::printf("dt > 100 count       : %u\n",   stats->big_dt_count);
-    std::printf("Torn frames          : %u (%.1f%%)\n",
+    std::printf("Frame resyncs        : %u\n", stats->resyncs);
+        std::printf("Torn frames          : %u (%.1f%%)\n",
                 stats->torn_frames,
                 total > 0 ? 100.0 * stats->torn_frames / total : 0.0);
 }
@@ -521,6 +552,10 @@ int main(int argc, char **argv)
         frames.reserve(static_cast<size_t>(CAPTURE_TIMEOUT_SECONDS * 12000.0));
 
         CaptureStats stats{};
+        // Consecutive CRC failures before assuming the frame boundary moved.
+        // A handful can be genuine corruption; a sustained run cannot.
+        constexpr int RESYNC_AFTER_TORN = 8;
+        int torn_streak = 0;
         uint32_t last_t    = 0;
         bool     have_last = false;
         bool     saw_run   = false;
@@ -568,8 +603,31 @@ int main(int argc, char **argv)
             if (crc_calc != crc_rx)
             {
                 stats.torn_frames++;
+
+                if (++torn_streak >= RESYNC_AFTER_TORN)
+                {
+                    torn_streak = 0;
+                    for (int shift = 1; shift < SYSID_FRAME_LEN; shift++)
+                    {
+                        if (spi_shift_bytes(fd, speed_hz, 1) < 0) { read_error = true; break; }
+
+                        uint8_t probe[SYSID_FRAME_LEN];
+                        if (spi_read_frame(fd, speed_hz, probe) < 0) { read_error = true; break; }
+
+                        const uint16_t pc = crc16_calc(probe, offsetof(SysIdSample, crc));
+                        const uint16_t pr = get_u16_le(&probe[offsetof(SysIdSample, crc)]);
+                        if (pc == pr)
+                        {
+                            stats.resyncs++;
+                            std::printf("  [resync] frame alignment recovered after %d byte(s)\n", shift);
+                            break;
+                        }
+                    }
+                    if (read_error) break;
+                }
                 continue;
             }
+            torn_streak = 0;
 
             SysIdSample s = decode_sysid_sample(rx);
 
