@@ -25,3 +25,6 @@ drive_data/
 !docs/ripple_debug_plot.png
 !docs/position_step_plot.png
 !docs/closed_pos_bode_plot.png
+
+__pycache__/
+*.pyc
