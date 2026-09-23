@@ -35,7 +35,7 @@
 
 #define SYSID_FRAME_LEN     32
 #define DEFAULT_DEV         "/dev/spidev0.0"
-#define DEFAULT_SPEED_HZ    1000000u
+#define DEFAULT_SPEED_HZ    4000000u  /* 1MHz -> 4MHz 2026-09-22, after the STM<->DRV logic GND fix. 4MHz previously gave 76.7% torn frames; that was the missing ground, not the clock. */
 // Read loop was issuing back-to-back SPI transactions as fast as the bus
 // and kernel driver allowed (no pacing at all) -- at 4MHz/32B that's on the
 // order of 10+ kHz of CS toggles, each one firing the STM's highest-priority
@@ -45,14 +45,24 @@
 // loop ID is done, so we don't need 10kHz+ telemetry -- throttling the host
 // read rate down to 5kHz gives the STM's IRQ priorities enough breathing
 // room between transactions.
-/* 2 kHz, not 10 kHz (2026-09-19). At 1 MHz a 32-byte transaction occupies
+/* 5 kHz at 4 MHz (2026-09-22). The note below was written for a 1 MHz
+ * clock, where a 32-byte transaction took 256us. At 4 MHz it takes 64us, so
+ * a 5 kHz period is 32% busy with ~136us idle -- about 2.7 control ticks land
+ * in each gap, so the firmware's NSS-idle write still refreshes the buffer
+ * between every read and frames stay distinct. Nyquist 2.5 kHz, enough to see
+ * the current loop's ~1.3 kHz pole roll off. 10 kHz remains out of reach
+ * this way: 36us idle is under one tick per gap, which is what the TX ring
+ * would fix.
+ *
+ * Original 1 MHz note:
+ * At 1 MHz a 32-byte transaction occupies
  * 256us; pacing at 10 kHz meant the Pi issued them back-to-back and the bus was
  * busy ~88% of the time. The firmware only rewrites its TX buffer while NSS is
  * idle (spi.c), so it almost never got a chance: telemetry updated 344 times a
  * second and 90% of captured frames were repeats. At 2 kHz the period is 500us
  * with ~244us idle, so the 20 kHz control loop lands in the gap about half its
  * ticks, and every captured frame is distinct. */
-#define TARGET_FRAME_RATE_HZ  2000.0
+#define TARGET_FRAME_RATE_HZ  5000.0
 // "latest" is overwritten every run — no digging through old plots to find
 // the one from the test you just ran. Move out anything you want to keep.
 #define DEFAULT_OUTDIR      "../drive_data/latest"
