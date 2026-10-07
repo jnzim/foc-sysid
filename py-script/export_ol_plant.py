@@ -8,14 +8,39 @@ import csv, json, sys
 import numpy as np
 from scipy.signal import csd, welch, coherence
 
+# TIME BASE -- SysIdSample.t is the STM's 20kHz control tick, 50us per count,
+# so it is the instant the sample was actually taken. host_time_s is when the
+# Pi's read() returned and jitters 99-598us against a 200us nominal. The Pi
+# also samples non-uniformly by construction (gaps alternate 2/3 ticks), and
+# Welch/CSD assume a uniform grid -- given a non-uniform one they do not fail,
+# they return a plausible spectrum of a time-warped signal, with the error
+# growing with frequency. So: real timestamps, then resample onto a uniform
+# grid. Requires firmware at drive@01ae2ce or later, which stamps the control
+# tick into SysIdSample.t; before that the field counted publishes.
+TICK_S = 50e-6
+
+
+def uniform_grid(rows, cols):
+    """rows -> (t, fs, {col: series}) on a true uniform grid."""
+    tt = np.array([float(r['t']) for r in rows]) * TICK_S
+    tt = tt - tt[0]
+    keep = np.concatenate([[True], np.diff(tt) > 0])   # drop duplicate ticks
+    tt = tt[keep]
+    fs = 1.0 / np.median(np.diff(tt))
+    grid = np.arange(tt[0], tt[-1], 1.0 / fs)
+    out = {}
+    for c in cols:
+        v = np.array([float(r[c]) for r in rows])[keep]
+        out[c] = np.interp(grid, tt, v)
+    return grid, fs, out
+
 path = sys.argv[1]
 R_NOM, L_NOM_MH = 1.55, 1.02
 
 rows = [r for r in csv.DictReader(open(path)) if r['flags'] == '0x0001']
-t  = np.array([float(r['host_time_s']) for r in rows])
-vq = np.array([float(r['vq_mV']) for r in rows]) / 1000.0
-iq = np.array([float(r['iq_mA']) for r in rows]) / 1000.0
-fs = 1.0 / np.median(np.diff(t))
+t, fs, _S = uniform_grid(rows, ['vq_mV', 'iq_mA'])
+vq = _S['vq_mV'] / 1000.0
+iq = _S['iq_mA'] / 1000.0
 
 vq_ac = vq - vq.mean()
 iq_ac = iq - iq.mean()
@@ -33,6 +58,9 @@ pha = np.degrees(np.unwrap(np.angle(H)))
 
 # first-order fit, identical to bode_plot.py: H = K/(1 + jw*tau), R = 1/K, L = tau*R
 from scipy.optimize import curve_fit
+
+
+
 def first_order_complex(ff, K, tau):
     Hh = K / (1j * 2.0 * np.pi * ff * tau + 1.0)
     return np.concatenate([Hh.real, Hh.imag])
