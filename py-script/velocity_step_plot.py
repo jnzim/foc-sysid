@@ -5,7 +5,7 @@ Usage:
     python3 velocity_step_plot.py drive_data/vel_step_log.csv
 
 CSV column remapping for SYSID_TEST_CL_VEL_STEP:
-    sysid_f    → vel_cmd  [mrad/s]   decode: val / 1000.0        → rad/s
+    sysid_f    → vel_cmd  [mrad/s / VEL_CMD_TELEM_DIV]  decode: val * 4 / 1000.0 → rad/s
     iq_cmd_mA  → vel_meas [counts/s] decode: val * (2π / 8192)   → rad/s
 
 iq_cmd is reconstructed from vq_mV / (current loop Kp) approximation —
@@ -125,7 +125,12 @@ t  = t - t[0]
 fs = 1.0 / np.median(np.diff(t))
 
 # Velocity — decoded from repurposed slots
-vel_cmd_raw  = df["sysid_f"].to_numpy(dtype=np.float64) / 1000.0
+# VEL_CMD_TELEM_DIV=4 on the firmware side (foc_sysid.c, CL_VEL_STEP only).
+# Plain mrad/s in an int16 wraps above 32.767 rad/s, and this test now runs
+# well past that -- at 80 rad/s the field decoded as a confident, wrong
+# 14.5 rad/s. CL_VEL_CHIRP and FRICTION_SWEEP keep plain mrad/s.
+VEL_CMD_TELEM_DIV = 4.0
+vel_cmd_raw  = df["sysid_f"].to_numpy(dtype=np.float64) * VEL_CMD_TELEM_DIV / 1000.0
 vel_meas_raw = df["iq_cmd_mA"].to_numpy(dtype=np.float64) * VEL_TELEM_DIV * (2.0 * np.pi / ENCODER_CPR)
 vel_meas     = smooth(vel_meas_raw)
 
