@@ -46,6 +46,7 @@ SETTLE_TIME_S = 2.0   # discard settle transient at the start of RUN
 # report the gap as if it were an error. It is not an error; they are
 # different quantities. Every label here now says which one it means.
 DESIGN_GC_HZ = 500.0
+DT_CURRENT_S = 50e-6     # 20kHz control tick, for reporting delay in ticks
 DESIGN_PM_DEG_LO = 85.0
 DESIGN_PM_DEG_HI = 88.0
 
@@ -221,21 +222,47 @@ print(f"  genuine {DESIGN_GC_HZ:.0f}Hz design would need Kp={KP_500:.3g} V/A, Ki
 print(f"  deployed Kp={DEPLOYED_KP:.3g}/Ki={DEPLOYED_KI:.4g} predicts gc={deployed_gc_hz:.1f} Hz "
       f"(zero/pole ratio={  (DEPLOYED_KI/DEPLOYED_KP) / (PLANT_R/PLANT_L) :.3f}, 1.0=perfect cancellation)")
 
-K0   = 10.0 ** (mag_dc / 20.0)
-tau0 = 1.0 / (2.0 * np.pi * (f_bw if f_bw is not None else DESIGN_GC_HZ))
+# Model: one pole plus a transport delay, DC gain FIXED at 1.
+#
+# K is not a free parameter. The controller has an integrator, so the loop has
+# infinite DC gain and H(0) = 1 exactly. Letting the optimizer move it does not
+# measure anything -- it just gives model error somewhere to hide.
+#
+# And the error it was hiding is the delay. A delay adds phase without touching
+# magnitude, which a single pole cannot reproduce, so the old fit dragged the
+# pole down to manufacture phase and then raised K to put the magnitude back.
+# On the 2026-10-06 gc=500Hz capture:
+#
+#   K free, 1 pole        K=1.151  fc=445 Hz                rms 0.1118
+#   K=1,    1 pole        K=1.000  fc=497 Hz                rms 0.1307
+#   K=1,    1 pole+delay  K=1.000  fc=783 Hz  td=113us      rms 0.0066
+#
+# Twenty times the fit quality, a pole that matches the measured -3dB (745-767
+# Hz) instead of undershooting it by 40%, and the loop delay falls out as a
+# measured number. 113us is 2.3 control ticks -- ADC conversion, computation,
+# PWM update -- and it is the thing that ultimately caps how far this loop can
+# be pushed, so it is worth reporting rather than absorbing into a fake gain.
+def _h_pole_delay(f, fc, td):
+    Hc = np.exp(-2j * np.pi * f * td) / (1.0 + 1j * f / fc)
+    return np.concatenate([Hc.real, Hc.imag])
+
 try:
     y_fit = np.concatenate([H[good].real, H[good].imag])
-    popt, _ = curve_fit(first_order_complex, f_good, y_fit, p0=[K0, tau0], maxfev=20_000)
-    K_fit, tau_fit = popt
-    tau_fit = abs(tau_fit)
-    fc_fit = 1.0 / (2.0 * np.pi * tau_fit)
-    H_fit_th = (K_fit) / (1j * 2.0 * np.pi * f_th * tau_fit + 1.0)
-    print(f"\nCurve fit of measured H(f) (single-pole model, coh>=0.5 bins):")
-    print(f"  K   = {K_fit:.3f} ({20*np.log10(abs(K_fit)):.2f} dB)")
-    print(f"  -3dB bandwidth (fit) : {fc_fit:.2f} Hz")
+    popt, _ = curve_fit(_h_pole_delay, f_good, y_fit,
+                        p0=[f_bw if f_bw is not None else DESIGN_GC_HZ, 100e-6],
+                        maxfev=20_000)
+    fc_fit, td_fit = abs(popt[0]), abs(popt[1])
+    resid = np.sqrt(np.mean((_h_pole_delay(f_good, fc_fit, td_fit) - y_fit) ** 2))
+    H_fit_th = np.exp(-2j * np.pi * f_th * td_fit) / (1.0 + 1j * f_th / fc_fit)
+    print(f"\nCurve fit of measured H(f) (one pole + delay, K fixed at 1, coh>=0.5 bins):")
+    print(f"  pole                 : {fc_fit:.2f} Hz")
+    print(f"  loop delay           : {td_fit*1e6:.0f} us "
+          f"({td_fit/DT_CURRENT_S:.1f} control ticks)")
+    print(f"  fit residual (rms)   : {resid:.4f}")
 except RuntimeError as exc:
     print(f"\nCurve fit of measured H(f) failed: {exc}")
     fc_fit = None
+    td_fit = None
     H_fit_th = None
 
 # ---------------------------------------------------------------------------
@@ -315,7 +342,7 @@ ax1.semilogx(f_th, 20*np.log10(np.abs(H_deployed_th)), "-", color="darkorange",
              label=f"deployed Kp/Ki prediction (gc={deployed_gc_hz:.0f}Hz)")
 if H_fit_th is not None:
     ax1.semilogx(f_th, 20*np.log10(np.abs(H_fit_th)), "-", color="crimson",
-                 linewidth=1.2, label=f"curve fit -3dB = {fc_fit:.0f} Hz")
+                 linewidth=1.2, label=f"fit: pole {fc_fit:.0f} Hz + {td_fit*1e6:.0f}us delay")
 ax1.set_ylabel("Closed-loop mag (dB)")
 ax1.set_title("Closed Current Loop -- H(s) = iq_meas / iq_cmd")
 ax1.legend(fontsize=8)
@@ -369,7 +396,7 @@ footer = []
 if f_bw is not None:
     footer.append(f"measured -3dB={f_bw:.1f} Hz (design gc {DESIGN_GC_HZ:.0f} Hz)")
 if fc_fit is not None:
-    footer.append(f"curve-fit BW={fc_fit:.1f} Hz")
+    footer.append(f"fit pole={fc_fit:.1f} Hz, delay={td_fit*1e6:.0f} us")
 footer.append(f"deployed-gain prediction={deployed_gc_hz:.1f} Hz")
 if f_gc is not None and pm is not None:
     footer.append(f"gc={f_gc:.2f} Hz, PM={pm:.1f} deg (design {DESIGN_PM_DEG_LO:.0f}-{DESIGN_PM_DEG_HI:.0f} deg)")
