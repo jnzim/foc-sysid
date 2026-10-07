@@ -73,8 +73,8 @@ TD_LOOP = 25e-6  # seconds
 # loop actually hit its target," not "would a fresh design hit it."
 # -----------------------------------------------------------------------------
 
-DEPLOYED_KP = 2.07     # V/A   -- config.h CURRENT_LOOP_KP
-DEPLOYED_KI = 2450.0   # V/(A*s) -- config.h CURRENT_LOOP_KI
+DEPLOYED_KP = 3.30     # V/A   -- config.h CURRENT_LOOP_KP
+DEPLOYED_KI = 5435.0   # V/(A*s) -- config.h CURRENT_LOOP_KI
 
 
 # -----------------------------------------------------------------------------
@@ -155,28 +155,50 @@ df = pd.read_csv(csv_path)
 # its samples, reported fs 2694 Hz against a real 5000, and fitted R=0.90 ohm /
 # L=0.35 mH against a real 1.62 / 1.14. Do not reintroduce an amplitude filter
 # here; reject on CRC at capture time instead.
+# TIME BASE -- SysIdSample.t, the STM's 20kHz control-tick counter, at
+# TICK_S per count. That is the instant the sample was actually taken.
+#
+# Not host_time_s: that is when the Pi's read() returned, and it jitters with
+# the Linux scheduler (measured 99-598 us against a 200 us nominal). Not a
+# sequence number either -- `t` used to count publishes rather than ticks, and
+# publishes only happen when the Pi's NSS is idle, so it advanced at ~10.7kHz
+# on a 20kHz loop with consecutive frames 1, 2 or 3 ticks apart and no way to
+# tell which.
+#
+# The Pi also samples non-uniformly by construction (it reads asynchronously,
+# so gaps alternate between 2 and 3 ticks). Welch/CSD assume a uniform grid and
+# do not fail on a non-uniform one -- they return a plausible spectrum of a
+# time-warped signal, with the distortion growing with frequency, which is
+# exactly where L is determined. So resample onto a true uniform grid first.
+TICK_S = 50e-6
+
 n_all = len(df)
 df = df[df["flags"] == "0x0001"]
 df = df[(df["host_time_s"] > 0.5) & (df["host_time_s"] < 20.0)]
-n_win = len(df)
 
-t  = df["host_time_s"].values - df["host_time_s"].min()
-vq = df["vq_mV"].values / 1000.0
+t_raw  = df["t"].values.astype(np.float64) * TICK_S
+t_raw -= t_raw[0]
+vq_raw = df["vq_mV"].values / 1000.0
+iq_raw = df["iq_mA"].values / 1000.0
 
+# A frame the Pi read twice before the STM refreshed it carries the same tick.
+# Those are duplicates, not samples; np.interp needs a strictly increasing x.
+keep   = np.concatenate([[True], np.diff(t_raw) > 0])
+n_dup  = (~keep).sum()
+t_raw, vq_raw, iq_raw = t_raw[keep], vq_raw[keep], iq_raw[keep]
 
-iq_ = df["iq_mA"].values / 1000.0
+gaps_ticks = np.diff(t_raw) / TICK_S
+fs = 1.0 / np.median(np.diff(t_raw))
 
-dt_s = np.diff(t)
-fs   = 1.0 / np.median(dt_s)
-jitter = (dt_s.max() - dt_s.min()) * fs
+t   = np.arange(t_raw[0], t_raw[-1], 1.0 / fs)
+vq  = np.interp(t, t_raw, vq_raw)
+iq_ = np.interp(t, t_raw, iq_raw)
 
-print(f"samples : {len(df)} of {n_all}  fs: {fs:.1f} Hz")
-if jitter > 0.5:
-    print(f"WARNING : sample spacing is not uniform "
-          f"(min {dt_s.min()*1e6:.0f} us, max {dt_s.max()*1e6:.0f} us, "
-          f"{jitter:.1f} samples of jitter). Welch/CSD assume a uniform grid, "
-          f"so the frequency axis below is suspect -- check the capture for "
-          f"dropped frames before trusting this fit.")
+print(f"samples : {len(t)} on a uniform grid "
+      f"(from {len(t_raw)} frames of {n_all}, {n_dup} duplicate ticks dropped)")
+print(f"fs      : {fs:.1f} Hz  (time base: STM tick x {TICK_S*1e6:.0f} us)")
+print(f"spacing : {gaps_ticks.min():.0f} to {gaps_ticks.max():.0f} ticks "
+      f"(median {np.median(gaps_ticks):.0f})")
 print(f"vq      : {vq.min()*1000:.1f} to {vq.max()*1000:.1f} mV")
 print(f"iq      : {iq_.min()*1000:.1f} to {iq_.max()*1000:.1f} mA")
 print(f"freq    : {df['sysid_f'].min():.1f} to {df['sysid_f'].max():.1f} Hz")
@@ -285,18 +307,25 @@ mag_3db = mag_dc - 3.0
 
 
 # -----------------------------------------------------------------------------
-# Current-loop gain and margins -- uses the ACTUAL deployed gains
-# (DEPLOYED_KP/KI) against the TRUE per-phase plant, not P_conf (which is
-# R_MEAS/L_MEAS as fit, i.e. line-to-line-equivalent -- halve both for the
-# per-phase R/L the firmware's Kp/L relationship actually assumes; see the
-# CURRENT_LOOP_KP/KI derivation comment in config.h).
+# Current-loop gain and margins, deployed gains against the fitted plant.
+#
+# This used to halve R_MEAS/L_MEAS first, on the assumption that the vq->iq fit
+# came out line-to-line. It does not: the fit is already per-phase. The
+# datasheet settles it -- AKM11E quotes line-to-line R=3.11 ohm / L=2.04 mH,
+# so per-phase is 1.555 ohm / 1.02 mH, and a 2.0V open-loop sweep fits
+# R=1.57 ohm. That is a 1% match to the per-phase figure and a 2x miss against
+# line-to-line.
+#
+# The halving therefore ran every margin estimate against a motor with half the
+# real R and L, inflating crossover by 2x -- it reported gc=566Hz for Kp=2.07
+# where the fitted plant gives 289Hz.
 # -----------------------------------------------------------------------------
 
-R_TRUE = R_MEAS / 2.0
-L_TRUE = L_MEAS / 2.0
+R_TRUE = R_MEAS
+L_TRUE = L_MEAS
 P_true = 1.0 / (R_TRUE + s_th * L_TRUE)
 
-print(f"\nTrue per-phase plant (R_MEAS/L_MEAS halved): R={R_TRUE:.3f} ohm  L={L_TRUE*1000:.3f} mH")
+print(f"\nPlant used for margins (per-phase, as fit): R={R_TRUE:.3f} ohm  L={L_TRUE*1000:.3f} mH")
 
 C_i = DEPLOYED_KP + DEPLOYED_KI / s_th
 
