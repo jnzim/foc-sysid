@@ -47,8 +47,26 @@ SETTLE_TIME_S = 2.0   # discard settle transient at the start of RUN
 # different quantities. Every label here now says which one it means.
 DESIGN_GC_HZ = 500.0
 DT_CURRENT_S = 50e-6     # 20kHz control tick, for reporting delay in ticks
-DESIGN_PM_DEG_LO = 85.0
-DESIGN_PM_DEG_HI = 88.0
+# Predicted phase margin, DERIVED rather than written down, so it tracks
+# DESIGN_GC_HZ instead of going stale when the crossover moves.
+#
+# With the PI zero on the plant pole the loop collapses to wc/s, which is 90 deg
+# of margin by construction. What takes it away is transport delay, at
+# 360 * f * td. The delay is measured, not assumed -- fitting the closed loop as
+# one pole plus a delay (below) gives 111us on the 2026-10-06 gc=500Hz capture,
+# i.e. 2.2 control ticks: ADC conversion, computation, PWM update.
+#
+# That predicts 90 - 20 = 70 deg at 500Hz, against 73.2 measured. The few
+# degrees left over are the zero/pole cancellation not being literally perfect.
+#
+# This replaced a hardcoded 85-88 deg, which came from a design that ignored the
+# delay entirely and so made every run look like it was underperforming. Earlier
+# phase estimates in this project assumed 75us (1.5 ticks); the measured figure
+# is half again as large.
+LOOP_DELAY_S     = 111e-6
+DESIGN_PM_DEG    = 90.0 - 360.0 * DESIGN_GC_HZ * LOOP_DELAY_S
+DESIGN_PM_DEG_LO = DESIGN_PM_DEG - 3.0
+DESIGN_PM_DEG_HI = DESIGN_PM_DEG + 3.0
 
 # Gains actually deployed on the STM32 right now (config.h CURRENT_LOOP_KP/KI).
 # Updated 2026-09-22: were 2.07/2450 (gc ~250Hz), so every reference curve on
