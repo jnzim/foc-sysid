@@ -38,21 +38,22 @@ from scipy.signal import coherence, csd, welch, detrend
 FLAG_RUN = 1
 SETTLE_TIME_S = 2.0   # discard settle transient at the start of RUN
 
-# Design-by-construction numbers this test exists to check (see config.h
-# CURRENT_LOOP_KP/KI comment) -- not used in any calculation below, printed
-# only as a reference to compare the measured result against.
-# 250 Hz, not the 500 Hz this used to carry: 500 was a stale label from before
-# the project corrected its current-loop target down, and it made every run
-# print "design target: 500 Hz" next to a perfectly on-target measurement.
-DESIGN_BW_HZ = 250.0
+# CROSSOVER, not bandwidth.
+#
+# Kp = 2*pi*f*L places gc -- the frequency where |L(jw)| = 1. The closed-loop
+# -3dB point lands roughly 1.4-1.9x ABOVE gc depending on damping. This file
+# used to compute gc, label it "BW", plot it against a measured -3dB and
+# report the gap as if it were an error. It is not an error; they are
+# different quantities. Every label here now says which one it means.
+DESIGN_GC_HZ = 500.0
 DESIGN_PM_DEG_LO = 85.0
 DESIGN_PM_DEG_HI = 88.0
 
 # Gains actually deployed on the STM32 right now (config.h CURRENT_LOOP_KP/KI).
-# Used below to compute what THESE gains predict against the plant fit,
-# independent of whatever BW label they were designed under.
-DEPLOYED_KP = 2.07       # V/A
-DEPLOYED_KI = 2450.0     # V/(A*s)
+# Updated 2026-09-22: were 2.07/2450 (gc ~250Hz), so every reference curve on
+# this plot was describing a controller that is no longer running.
+DEPLOYED_KP = 3.30       # V/A
+DEPLOYED_KI = 5435.0     # V/(A*s)
 
 # Open-loop plant fit. Not re-fit here -- this test is closed-loop
 # (iq_cmd->iq_meas) and has no open-loop data of its own; see bode_plot.py.
@@ -61,8 +62,8 @@ DEPLOYED_KI = 2450.0     # V/(A*s)
 # before the ADC sample-timing fix (drive 3720707) and before the telemetry
 # frame corruption was fixed (drive 7ec52fb). Re-measured on a verified path:
 # drive_data/archive/ol_current_chirp_fixed_2026-09-19.csv.
-PLANT_R = 1.479          # ohm, per-phase
-PLANT_L = 1.327e-3       # H, per-phase
+PLANT_R = 1.73           # ohm, per-phase
+PLANT_L = 1.05e-3        # H, per-phase
 
 
 def zero_cancel_pi(bw_hz, R, L):
@@ -189,7 +190,7 @@ f_bw = interp_log_x_for_y(f_csd[good], mag_good, mag_3db)
 print(f"\nClosed current loop -- H(s) = iq_meas / iq_cmd")
 print(f"  DC gain (ref)   : {mag_dc:.2f} dB")
 if f_bw is not None:
-    print(f"  -3dB bandwidth  : {f_bw:.2f} Hz  (design target: {DESIGN_BW_HZ:.0f} Hz)")
+    print(f"  -3dB bandwidth  : {f_bw:.2f} Hz  (design gc {DESIGN_GC_HZ:.0f} Hz; -3dB sits ~1.4-1.9x above gc)")
 else:
     print("  -3dB bandwidth  : not found in swept range -- widen CL_CURRENT_CHIRP_F_END")
 
@@ -197,7 +198,7 @@ else:
 # Two comparison curves, both requested directly rather than left as a bare
 # number:
 #   (1) "the model that shows 500Hz" -- a genuine zero-cancellation design
-#       for BW_TARGET=500Hz against the cited plant fit (PLANT_R/PLANT_L).
+#       for gc=DESIGN_GC_HZ against the cited plant fit (PLANT_R/PLANT_L).
 #       This is NOT what's deployed; it's what Kp/Ki *would* need to be.
 #   (2) the DEPLOYED gains' own theoretical prediction against that same
 #       plant fit -- shows whether the 500Hz shortfall is a measurement
@@ -209,19 +210,19 @@ else:
 # ---------------------------------------------------------------------------
 f_th = np.logspace(np.log10(0.3), np.log10(fs * 0.45), 500)
 
-KP_500, KI_500 = zero_cancel_pi(DESIGN_BW_HZ, PLANT_R, PLANT_L)
+KP_500, KI_500 = zero_cancel_pi(DESIGN_GC_HZ, PLANT_R, PLANT_L)
 H_500_th = closed_loop_theory(f_th, KP_500, KI_500, PLANT_R, PLANT_L)
 
 H_deployed_th = closed_loop_theory(f_th, DEPLOYED_KP, DEPLOYED_KI, PLANT_R, PLANT_L)
-deployed_bw_hz = DEPLOYED_KP / PLANT_L / (2.0 * np.pi)  # exact for perfect cancellation
+deployed_gc_hz = DEPLOYED_KP / PLANT_L / (2.0 * np.pi)  # CROSSOVER, exact for perfect cancellation
 
 print(f"\nComparison models against plant fit R={PLANT_R:.2f} ohm, L={PLANT_L*1000:.2f} mH:")
-print(f"  genuine {DESIGN_BW_HZ:.0f}Hz design would need Kp={KP_500:.3g} V/A, Ki={KI_500:.4g} V/(A*s)")
-print(f"  deployed Kp={DEPLOYED_KP:.3g}/Ki={DEPLOYED_KI:.4g} predicts BW={deployed_bw_hz:.1f} Hz "
+print(f"  genuine {DESIGN_GC_HZ:.0f}Hz design would need Kp={KP_500:.3g} V/A, Ki={KI_500:.4g} V/(A*s)")
+print(f"  deployed Kp={DEPLOYED_KP:.3g}/Ki={DEPLOYED_KI:.4g} predicts gc={deployed_gc_hz:.1f} Hz "
       f"(zero/pole ratio={  (DEPLOYED_KI/DEPLOYED_KP) / (PLANT_R/PLANT_L) :.3f}, 1.0=perfect cancellation)")
 
 K0   = 10.0 ** (mag_dc / 20.0)
-tau0 = 1.0 / (2.0 * np.pi * (f_bw if f_bw is not None else DESIGN_BW_HZ))
+tau0 = 1.0 / (2.0 * np.pi * (f_bw if f_bw is not None else DESIGN_GC_HZ))
 try:
     y_fit = np.concatenate([H[good].real, H[good].imag])
     popt, _ = curve_fit(first_order_complex, f_good, y_fit, p0=[K0, tau0], maxfev=20_000)
@@ -304,17 +305,17 @@ ax1.semilogx(f_csd[strong], mag_db[strong], "b.", markersize=4, label="coh>=0.8"
 ax1.axhline(mag_dc, color="gray", linestyle=":", label=f"DC ref {mag_dc:.1f} dB")
 ax1.axhline(mag_3db, color="orange", linestyle=":", label="-3dB")
 if f_bw is not None:
-    ax1.axvline(f_bw, color="red", linestyle="--", label=f"BW = {f_bw:.1f} Hz")
-ax1.axvline(DESIGN_BW_HZ, color="black", linestyle=":", alpha=0.5,
-            label=f"design target {DESIGN_BW_HZ:.0f} Hz")
+    ax1.axvline(f_bw, color="red", linestyle="--", label=f"measured -3dB = {f_bw:.1f} Hz")
+ax1.axvline(DESIGN_GC_HZ, color="black", linestyle=":", alpha=0.5,
+            label=f"design gc {DESIGN_GC_HZ:.0f} Hz")
 ax1.semilogx(f_th, 20*np.log10(np.abs(H_500_th)), "k--", linewidth=1.2,
-             label=f"genuine {DESIGN_BW_HZ:.0f}Hz model (Kp={KP_500:.3g})")
+             label=f"gc={DESIGN_GC_HZ:.0f}Hz model (Kp={KP_500:.3g})")
 ax1.semilogx(f_th, 20*np.log10(np.abs(H_deployed_th)), "-", color="darkorange",
              linewidth=1.2,
-             label=f"deployed Kp/Ki prediction (BW={deployed_bw_hz:.0f}Hz)")
+             label=f"deployed Kp/Ki prediction (gc={deployed_gc_hz:.0f}Hz)")
 if H_fit_th is not None:
     ax1.semilogx(f_th, 20*np.log10(np.abs(H_fit_th)), "-", color="crimson",
-                 linewidth=1.2, label=f"curve fit (BW={fc_fit:.0f}Hz)")
+                 linewidth=1.2, label=f"curve fit -3dB = {fc_fit:.0f} Hz")
 ax1.set_ylabel("Closed-loop mag (dB)")
 ax1.set_title("Closed Current Loop -- H(s) = iq_meas / iq_cmd")
 ax1.legend(fontsize=8)
@@ -366,10 +367,10 @@ ax5.grid(True, which="both")
 
 footer = []
 if f_bw is not None:
-    footer.append(f"measured BW={f_bw:.1f} Hz (design {DESIGN_BW_HZ:.0f} Hz)")
+    footer.append(f"measured -3dB={f_bw:.1f} Hz (design gc {DESIGN_GC_HZ:.0f} Hz)")
 if fc_fit is not None:
     footer.append(f"curve-fit BW={fc_fit:.1f} Hz")
-footer.append(f"deployed-gain prediction={deployed_bw_hz:.1f} Hz")
+footer.append(f"deployed-gain prediction={deployed_gc_hz:.1f} Hz")
 if f_gc is not None and pm is not None:
     footer.append(f"gc={f_gc:.2f} Hz, PM={pm:.1f} deg (design {DESIGN_PM_DEG_LO:.0f}-{DESIGN_PM_DEG_HI:.0f} deg)")
 if f_pc is not None and gm is not None:
