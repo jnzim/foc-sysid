@@ -143,11 +143,22 @@ print(f"plot gen'd : {plot_gen_time:%Y-%m-%d %H:%M:%S}")
 
 df = pd.read_csv(csv_path)
 
+# Welch/CSD below assume UNIFORM sampling. Every row dropped here punches a
+# hole in the series, and fs is then computed from a gappy time vector -- which
+# silently corrupts the whole frequency axis rather than failing. So: take one
+# contiguous window, drop nothing inside it, and shout if that is not possible.
+#
+# There used to be a `df[df["vq_mV"].abs() < 1500]` here. It was a guard from
+# the torn-link era, when a vq of 1500+ mV meant a corrupted frame. With the
+# frame CRC and the STM<->DRV ground fix it is obsolete, and at SYSID_AMPLITUDE
+# >= 1.5V it quietly deleted the top of every sine peak: a 2.0V run lost 48% of
+# its samples, reported fs 2694 Hz against a real 5000, and fitted R=0.90 ohm /
+# L=0.35 mH against a real 1.62 / 1.14. Do not reintroduce an amplitude filter
+# here; reject on CRC at capture time instead.
+n_all = len(df)
 df = df[df["flags"] == "0x0001"]
 df = df[(df["host_time_s"] > 0.5) & (df["host_time_s"] < 20.0)]
-df = df[df["sysid_f"] > 0]
-df = df[df["dt"] > 0]
-df = df[df["vq_mV"].abs() < 1500]
+n_win = len(df)
 
 t  = df["host_time_s"].values - df["host_time_s"].min()
 vq = df["vq_mV"].values / 1000.0
@@ -155,9 +166,17 @@ vq = df["vq_mV"].values / 1000.0
 
 iq_ = df["iq_mA"].values / 1000.0
 
-fs = 1.0 / np.mean(np.diff(t))
+dt_s = np.diff(t)
+fs   = 1.0 / np.median(dt_s)
+jitter = (dt_s.max() - dt_s.min()) * fs
 
-print(f"samples : {len(df)}  fs: {fs:.1f} Hz")
+print(f"samples : {len(df)} of {n_all}  fs: {fs:.1f} Hz")
+if jitter > 0.5:
+    print(f"WARNING : sample spacing is not uniform "
+          f"(min {dt_s.min()*1e6:.0f} us, max {dt_s.max()*1e6:.0f} us, "
+          f"{jitter:.1f} samples of jitter). Welch/CSD assume a uniform grid, "
+          f"so the frequency axis below is suspect -- check the capture for "
+          f"dropped frames before trusting this fit.")
 print(f"vq      : {vq.min()*1000:.1f} to {vq.max()*1000:.1f} mV")
 print(f"iq      : {iq_.min()*1000:.1f} to {iq_.max()*1000:.1f} mA")
 print(f"freq    : {df['sysid_f'].min():.1f} to {df['sysid_f'].max():.1f} Hz")
