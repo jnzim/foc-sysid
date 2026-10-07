@@ -4,15 +4,38 @@ import csv, json, sys
 import numpy as np
 from scipy.signal import csd, welch, coherence, detrend
 
+# TIME BASE -- SysIdSample.t is the STM's 20kHz control tick, 50us per count,
+# so it is the instant the sample was actually taken. host_time_s is the Pi's
+# read() return and jitters 99-598us against a 200us nominal; the Pi also
+# samples non-uniformly by construction. Welch/CSD assume a uniform grid and do
+# not fail on a non-uniform one -- they return a plausible spectrum of a
+# time-warped signal, with the error growing with frequency. Requires firmware
+# at drive@01ae2ce or later.
+TICK_S = 50e-6
+
+
+def uniform_grid(rows, cols):
+    """rows -> (t, fs, {col: series}) on a true uniform grid."""
+    tt = np.array([float(r['t']) for r in rows]) * TICK_S
+    tt = tt - tt[0]
+    keep = np.concatenate([[True], np.diff(tt) > 0])   # drop duplicate ticks
+    tt = tt[keep]
+    fs = 1.0 / np.median(np.diff(tt))
+    grid = np.arange(tt[0], tt[-1], 1.0 / fs)
+    out = {}
+    for c in cols:
+        v = np.array([float(r[c]) for r in rows])[keep]
+        out[c] = np.interp(grid, tt, v)
+    return grid, fs, out
+
+
 path, out = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else None)
 rows = [r for r in csv.DictReader(open(path)) if r['flags'] == '0x0001']
-t    = np.array([float(r['host_time_s']) for r in rows]); t -= t[0]
-cmd  = np.array([float(r['sysid_f'])     for r in rows]) / 1000.0
-meas = np.array([float(r['iq_cmd_mA'])   for r in rows]) / 1000.0
+t, fs, _S = uniform_grid(rows, ['sysid_f', 'iq_cmd_mA'])
+cmd  = _S['sysid_f']   / 1000.0
+meas = _S['iq_cmd_mA'] / 1000.0
 keep = t >= 2.0
 t, cmd, meas = t[keep], cmd[keep], meas[keep]
-fs = 1.0 / np.median(np.diff(t))
-
 nperseg = min(len(t), max(256, int(fs * 2.0)))
 c, m = detrend(cmd), detrend(meas)
 f, Scm = csd(c, m, fs=fs, nperseg=nperseg)
