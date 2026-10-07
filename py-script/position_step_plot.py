@@ -46,11 +46,10 @@ def step_metrics(t, pos, cmd_before, cmd_after):
     if abs(step_size) < 1e-9:
         return None
 
-    # The telemetry link has no CRC check -- a single corrupted SPI sample
-    # shows up as an instantaneous, physically-impossible jump. A light
-    # median filter kills those single-sample spikes (kernel is ~0.5ms at
-    # this sample rate, negligible next to a multi-ms rise time) without
-    # smearing the real transition.
+    # Light median filter against single-sample spikes. Kernel 5 is 1ms at a
+    # 5kHz capture rate, which is NOT negligible against a ~3ms rise time --
+    # it is kept because it is symmetric (no group delay, so it does not shift
+    # the crossings) but do not widen it.
     pos = medfilt(pos, kernel_size=5)
 
     t0 = t[0]
@@ -72,15 +71,26 @@ def step_metrics(t, pos, cmd_before, cmd_after):
     t_hi = first_cross(hi)
     rise_time = (t_hi - t_lo) if (t_lo is not None and t_hi is not None) else None
 
-    # Overshoot beyond the final command. Uses a 99.5th-percentile "peak"
-    # instead of true max/min -- the telemetry link has no CRC check, and a
-    # single corrupted SPI sample (an instantaneous, physically-impossible
-    # jump) would otherwise blow this number out.
+    # Overshoot: the true peak, taken from a window just after the step.
+    #
+    # This used to be np.percentile(pos, 99.5) over the whole segment, as a
+    # guard against corrupted SPI samples back when the link had no CRC. It
+    # reported 0.0% on a response that plainly overshot 9%: the segment is a
+    # 2 s hold, the overshoot lasts about 5 ms, so the 99.5th percentile of
+    # almost-entirely-settled data just returns the settled value.
+    #
+    # The guard is also obsolete -- frames carry a CRC now, and the medfilt
+    # above already removes single-sample spikes. So take the real extremum,
+    # over OVERSHOOT_WINDOW_S of transient rather than the full hold.
+    OVERSHOOT_WINDOW_S = 0.100
+    win = tt <= OVERSHOOT_WINDOW_S
+    if not win.any():
+        win = slice(None)
     if step_size > 0:
-        peak = np.percentile(pos, 99.5)
+        peak = pos[win].max()
         overshoot_pct = 100.0 * max(0.0, peak - cmd_after) / abs(step_size)
     else:
-        peak = np.percentile(pos, 0.5)
+        peak = pos[win].min()
         overshoot_pct = 100.0 * max(0.0, cmd_after - peak) / abs(step_size)
 
     # Settling time: last time the response leaves the 2% band and never returns
@@ -106,7 +116,7 @@ ENCODER_CPR = 8192.0
 VEL_TELEM_DIV = 8.0  # firmware sends vel_meas_counts / VEL_TELEM_DIV as int16
 
 df = pd.read_csv(csv_path)
-required = ["host_time_s", "flags", "sysid_f", "iq_cmd_mA", "iq_mA", "vq_mV", "dt",
+required = ["host_time_s", "t", "flags", "sysid_f", "iq_cmd_mA", "iq_mA", "vq_mV", "dt",
             "enc_hi_raw", "enc_lo_raw"]
 missing = [name for name in required if name not in df.columns]
 if missing:
@@ -118,7 +128,12 @@ df = df[run & (df["dt"] > 0)].copy()
 if len(df) < 100:
     raise RuntimeError("Too few RUN-stage samples in the CSV")
 
-t = df["host_time_s"].to_numpy(dtype=np.float64)
+# TIME BASE -- SysIdSample.t is the STM's 20kHz control tick at 50us per count,
+# i.e. when the sample was actually taken. host_time_s is when the Pi's read()
+# returned and jitters 99-598us against a 200us nominal, which is the same order
+# as the rise time being measured here. Requires firmware at drive@01ae2ce or
+# later; before that the field counted publishes rather than ticks.
+t = df["t"].to_numpy(dtype=np.float64) * 50e-6
 t = t - t[0]
 
 pos_cmd  = df["sysid_f"].to_numpy(dtype=np.float64) / 1000.0       # rad
