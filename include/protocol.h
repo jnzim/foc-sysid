@@ -33,6 +33,7 @@
 #define FAULT_TRAJ_CRC          0x01
 #define FAULT_TRAJ_DROP         0x02
 #define FAULT_TRAJ_OVF          0x04
+#define FAULT_FOLLOWING_ERROR   0x08  /* |pos_cmd - pos_fbk| > FOLLOWING_ERROR_LIMIT (drive config.h) */
 
 /* =============================================================================
  * TelemetryFrame — 32 bytes

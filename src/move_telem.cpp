@@ -297,6 +297,14 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
             saw_servo_on = true;
             printf("MoveCmd confirmed received after %u send(s)\n", move_cmd_sends);
         }
+        if (saw_servo_on && frame.drive_state == DRIVE_FAULT)
+        {
+            printf("DRIVE FAULT after %zu frames: fault_flags=0x%02x%s -- bridge is off, "
+                   "reset the STM to clear\n",
+                   samples.size(), frame.fault_flags,
+                   (frame.fault_flags & FAULT_FOLLOWING_ERROR) ? " (following error)" : "");
+            break;
+        }
         if (saw_servo_on && frame.drive_state == DRIVE_IDLE)
         {
             printf("move complete after %zu frames (%u torn, %u/%u resyncs)\n",
