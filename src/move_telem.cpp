@@ -196,8 +196,11 @@ static bool wait_for_enter(const char *prompt)
     return fgets(line, sizeof(line), stdin) != nullptr;
 }
 
+// Returns 0 on a completed move, 2 if the drive faulted (the queue must
+// stop: the STM stays in FAULT until reset), -1 on a capture failure.
 static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
-                             int32_t target_pos, int32_t vel_max, int32_t accel_max)
+                             int32_t target_pos, int32_t vel_max, int32_t accel_max,
+                             size_t move_index)
 {
     // Boot-gate trigger -- same 10ms active-low pulse main.cpp uses. The
     // STM blocks at boot until it sees this, regardless of what firmware
@@ -222,6 +225,7 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
     uint32_t resync_attempts  = 0;
     uint32_t resync_successes = 0;
     bool     saw_servo_on   = false;
+    bool     faulted        = false;
 
     // A single torn frame is normal bus noise (~3-5% baseline) and doesn't
     // mean the byte alignment itself is wrong -- only treat it as a real
@@ -303,6 +307,7 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
                    "reset the STM to clear\n",
                    samples.size(), frame.fault_flags,
                    (frame.fault_flags & FAULT_FOLLOWING_ERROR) ? " (following error)" : "");
+            faulted = true;
             break;
         }
         if (saw_servo_on && frame.drive_state == DRIVE_IDLE)
@@ -347,7 +352,19 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
     int rc = system("python3 " PLOT_SCRIPT);
     (void)rc;
 
-    return 0;
+    // Keep a numbered copy of every move. OUT_CSV is overwritten by the next
+    // move in the queue, which is how a failed move's data was lost
+    // (2026-10-10: move 1 ran away, move 2 overwrote it).
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "cp ../drive_data/latest/move_telem.csv ../drive_data/latest/move_telem_%zu.csv && "
+             "cp ../drive_data/latest/move_telem_plot.png ../drive_data/latest/move_telem_plot_%zu.png",
+             move_index, move_index);
+    if (system(cmd) == 0)
+        printf("kept drive_data/latest/move_telem_%zu.csv and move_telem_plot_%zu.png\n",
+               move_index, move_index);
+
+    return faulted ? 2 : 0;
 }
 
 // If MOVE_CMD_FILE exists, each non-empty, non-comment ('#') line is one
@@ -483,7 +500,11 @@ int main(int argc, char **argv)
                    i + 1, moves.size(), m.target_mm, target_pos, m.vel_mm_s, vel_max,
                    m.accel_mm_s2, accel_max);
 
-            capture_one_move(fd, gpio_h, speed_hz, target_pos, vel_max, accel_max);
+            if (capture_one_move(fd, gpio_h, speed_hz, target_pos, vel_max, accel_max, i + 1) == 2)
+            {
+                printf("drive faulted -- skipping the rest of the queue; reset the STM\n");
+                break;
+            }
         }
     }
 
