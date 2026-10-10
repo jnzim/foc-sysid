@@ -86,6 +86,7 @@
 #define SYSID_TEST_POSITION_STEP       7u
 #define SYSID_TEST_CL_POS_CHIRP        8u
 #define SYSID_TEST_CINE_SWEEP          9u
+#define SYSID_TEST_CL_VEL_PLANT_CHIRP  14u
 
 static volatile sig_atomic_t g_run = 1;
 
@@ -405,6 +406,7 @@ static std::vector<const char *> plot_scripts_for_test(uint16_t test_id)
         case SYSID_TEST_RIPPLE_DEBUG:
             return { "../py-script/ripple_debug_plot.py" };
         case SYSID_TEST_CL_VEL_CHIRP:
+        case SYSID_TEST_CL_VEL_PLANT_CHIRP:
             return { "../py-script/closed_vel_bode_plot.py" };
         case SYSID_TEST_POSITION_STEP:
             return { "../py-script/position_step_plot.py" };
