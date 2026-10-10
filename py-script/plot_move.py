@@ -66,7 +66,7 @@ axes[0].set_ylabel("Position (mm)")
 axes[0].set_title(f"move_telem capture -- {os.path.basename(csv)}")
 
 axes[1].plot(t, w.vel_cmd / COUNTS_PER_MM, label="vel_cmd")
-axes[1].plot(t, w.vel_fbk / COUNTS_PER_MM, label="vel_fbk (encoder boxcar)", alpha=0.8)
+axes[1].plot(t, w.vel_fbk / COUNTS_PER_MM, label="vel_fbk (loop feedback: observer)", alpha=0.8)
 axes[1].set_ylabel("Velocity (mm/s)")
 
 # Following error on its own axis and in microns: overlaid on the position
