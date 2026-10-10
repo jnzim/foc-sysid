@@ -2,9 +2,9 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Clean Build Run",
+            "label": "Build",
             "type": "shell",
-            "command": "rm -rf ${workspaceFolder}/build && mkdir ${workspaceFolder}/build && cd ${workspaceFolder}/build && cmake .. && make -j4 && ./drive",
+            "command": "rm -rf ${workspaceFolder}/build && mkdir ${workspaceFolder}/build && cd ${workspaceFolder}/build && cmake .. && make -j4 && ./move_telem",
             "group": {
                 "kind": "build",
                 "isDefault": true
@@ -13,7 +13,9 @@
                 "reveal": "always",
                 "panel": "shared"
             },
-            "problemMatcher": ["$gcc"]
+            "problemMatcher": [
+                "$gcc"
+            ]
         },
         {
             "label": "clean",
@@ -25,7 +27,9 @@
             "label": "rebuild",
             "type": "shell",
             "command": "rm -rf ${workspaceFolder}/build && mkdir ${workspaceFolder}/build && cd ${workspaceFolder}/build && cmake .. && make -j4",
-            "problemMatcher": ["$gcc"]
+            "problemMatcher": [
+                "$gcc"
+            ]
         }
     ]
 }

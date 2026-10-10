@@ -9,3 +9,10 @@ add_executable(drive
 
 target_include_directories(drive PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(drive PRIVATE lgpio)
+add_executable(move_telem
+    src/move_telem.cpp
+    src/protocol.cpp
+)
+
+target_include_directories(move_telem PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(move_telem PRIVATE lgpio)
