@@ -66,17 +66,37 @@ def cross(fx, m, target):
     return float(10**lx)
 
 fg, mg = f[good], mag[good]
+Hg     = H[good]
 dc     = float(np.mean(mg[fg < 5]))
 bw_raw = cross(fg, mg, dc - 3.0)
 
-def one_pole(ff, K, tau):
-    Hh = K/(1j*2*np.pi*ff*tau + 1.0)
+# One pole plus a transport delay, DC gain FIXED at 1.
+#
+# K is not a free parameter: the controller has an integrator, so the loop has
+# infinite DC gain and H(0) = 1 exactly. Letting the optimizer move it does not
+# measure anything, it gives model error somewhere to hide -- and the error it
+# was hiding is the delay. A delay adds phase without touching magnitude, which
+# a single pole cannot reproduce, so the old fit dragged the pole down to
+# manufacture phase and then raised K to put the magnitude back. That is why
+# the published curve sat ~1.4dB above the measured data at DC.
+#
+#   K free, 1 pole        K=1.151  fc=445 Hz              rms 0.1118
+#   K=1,    1 pole        K=1.000  fc=497 Hz              rms 0.1307
+#   K=1,    1 pole+delay  K=1.000  fc=783 Hz  td=113us    rms 0.0066
+#
+# 113us is 2.3 control ticks -- ADC conversion, computation, PWM update -- and
+# it is what caps this loop, so it is reported rather than absorbed into a gain
+# the loop cannot physically have.
+def pole_delay(ff, fc, td):
+    Hh = np.exp(-2j*np.pi*ff*td)/(1.0 + 1j*ff/fc)
     return np.concatenate([Hh.real, Hh.imag])
-Hg   = H[good]
-p, _ = curve_fit(one_pole, fg, np.concatenate([Hg.real, Hg.imag]),
-                 p0=[float(np.abs(Hg[np.argmin(fg)])), 1/(2*np.pi*250)], maxfev=20000)
-K_fit, tau_fit = p[0], abs(p[1])
-bw_fit = 1/(2*np.pi*tau_fit)
+
+p, _ = curve_fit(pole_delay, fg, np.concatenate([Hg.real, Hg.imag]),
+                 p0=[250.0, 100e-6], maxfev=20000)
+fc_fit, td_fit = abs(p[0]), abs(p[1])
+tau_fit = 1.0/(2*np.pi*fc_fit)
+K_fit   = 1.0
+bw_fit  = fc_fit
 
 # open loop backed out of the closed loop
 L      = Hg/(1.0 - Hg)
@@ -93,7 +113,7 @@ def thin(mask, n):
 si, wi = thin(strong, 400), thin(good & ~strong, 400)
 li     = np.linspace(0, len(fg)-1, min(400, len(fg))).astype(int)
 f_fit  = np.logspace(np.log10(0.3), np.log10(950), 200)
-Hf     = K_fit/(1j*2*np.pi*f_fit*tau_fit + 1.0)
+Hf     = np.exp(-2j*np.pi*f_fit*td_fit)/(1.0 + 1j*f_fit/fc_fit)
 rnd    = lambda a, n=2: [round(float(v), n) for v in a]
 
 res = {
@@ -110,4 +130,4 @@ res = {
  },
 }
 print(json.dumps(res), file=open(out,'w') if out else sys.stdout)
-print(f"fs={fs:.1f}  dc={dc:.2f} dB  bw_raw={bw_raw:.1f}  bw_fit={bw_fit:.1f}  gc={gc:.1f}  pm={pm:.1f}", file=sys.stderr)
+print(f"fit pole={fc_fit:.1f} Hz  delay={td_fit*1e6:.0f} us\nfs={fs:.1f}  dc={dc:.2f} dB  bw_raw={bw_raw:.1f}  bw_fit={bw_fit:.1f}  gc={gc:.1f}  pm={pm:.1f}", file=sys.stderr)
