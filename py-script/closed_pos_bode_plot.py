@@ -11,7 +11,7 @@ H_pos(s) = pos_meas / pos_cmd directly, rather than the H(s)/s construction
 design POSITION_LOOP_KP in closed_vel_bode_plot.py. This is the real thing,
 not the theoretical stand-in for it.
 
-Telemetry mapping (same convention as SYSID_TEST_POSITION_STEP):
+Telemetry mapping (SYSID_TEST_CL_POS_CHIRP):
     sysid_f   -> position command [mrad]
     iq_cmd_mA -> measured position [mrad]
 """
@@ -29,7 +29,7 @@ import pandas as pd
 from scipy.signal import coherence, csd, welch, detrend
 
 FLAG_RUN = 1
-SETTLE_TIME_S = 1.5   # firmware settles for 1s (POSITION_STEP_SETTLE_TICKS @ 1kHz) before chirping
+SETTLE_TIME_S = 1.5   # firmware settles for 1s (CL_POS_CHIRP_SETTLE_TICKS @ 1kHz) before chirping
 
 # pos_cmd/pos_meas only actually update at 1kHz (DT_POSITION, POS_LOOP_DECIMATE)
 # even though the host telemetry link samples much faster (~10kHz) -- that 1kHz

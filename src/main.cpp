@@ -72,20 +72,14 @@
 #define SYSID_STAGE_IDLE         2u
 #define PIN_FIRE_SYSID      3    // Pi GPIO3 → STM PC3, active-low trigger
 
-// Mirrors Include/config.h SYSID_TEST_* values on the STM32 side.
-// The firmware stamps its compile-time SYSID_TEST into SysIdSample.pad
-// (see spi_sysid_update_latest() in src/spi.c) so this side always knows
-// which test actually ran, instead of guessing which script to run.
+// Mirrors the firmware's SYSID_TEST_* IDs (Include/config.h). The firmware
+// stamps its compile-time SYSID_TEST into SysIdSample.pad, so this side knows
+// which test ran and which script to run. IDs are fixed; gaps are removed tests.
 #define SYSID_TEST_CURRENT_LOOP_CHIRP  0u
-#define SYSID_TEST_CURRENT_LOOP_STEP   1u
-#define SYSID_TEST_VEL_CHIRP           2u
 #define SYSID_TEST_CL_CURRENT_CHIRP    3u
-#define SYSID_TEST_CL_VEL_STEP         4u
-#define SYSID_TEST_RIPPLE_DEBUG        5u
 #define SYSID_TEST_CL_VEL_CHIRP        6u
-#define SYSID_TEST_POSITION_STEP       7u
 #define SYSID_TEST_CL_POS_CHIRP        8u
-#define SYSID_TEST_CINE_SWEEP          9u
+#define SYSID_TEST_FRICTION_SWEEP      12u
 #define SYSID_TEST_CL_VEL_PLANT_CHIRP  14u
 
 static volatile sig_atomic_t g_run = 1;
@@ -290,11 +284,9 @@ static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[SYSID_FRAME_LEN]
 
 // encoder_position is enc_hi/enc_lo combined into a real 32-bit encoder
 // count -- what most tests actually want. enc_hi_raw/enc_lo_raw pass the two
-// halves through unmodified: the position-loop tests (SYSID_TEST_POSITION_STEP,
-// SYSID_TEST_CL_POS_CHIRP) repurpose them on the STM32 side to carry
-// vel_cmd_rad_sec [mrad/s] and measured velocity [counts/s] instead, since
-// encoder_position is otherwise fully redundant with pos_meas for those tests
-// (see foc_sysid_step() telemetry section in foc_sysid.c).
+// halves through unmodified, because some tests repurpose them on the STM32
+// side (the velocity and position chirps send velocity and iq_cmd there; see
+// the telemetry section of foc_sysid_step() in foc_sysid.c).
 static void write_csv_header(FILE *f)
 {
     std::fprintf(
@@ -386,34 +378,21 @@ static void print_summary(const CaptureStats *stats, double elapsed_s,
                 total > 0 ? 100.0 * stats->torn_frames / total : 0.0);
 }
 
-// Which analysis script(s) to run for a given SYSID_TEST, read back from
-// SysIdSample.pad. Some tests have a companion time-domain plot alongside
-// the primary Bode/step analysis.
+// Which analysis script to run for a given SYSID_TEST, read back from
+// SysIdSample.pad. The friction sweep has no script yet; its CSV is kept.
 static std::vector<const char *> plot_scripts_for_test(uint16_t test_id)
 {
     switch (test_id)
     {
         case SYSID_TEST_CURRENT_LOOP_CHIRP:
             return { "../py-script/bode_plot.py" };
-        case SYSID_TEST_CURRENT_LOOP_STEP:
-            return { "../py-script/step.py" };
-        case SYSID_TEST_VEL_CHIRP:
-            return { "../py-script/bode_vel_plot.py", "../py-script/vel_v_t.py" };
         case SYSID_TEST_CL_CURRENT_CHIRP:
             return { "../py-script/closed_current_bode_plot.py" };
-        case SYSID_TEST_CL_VEL_STEP:
-            return { "../py-script/velocity_step_plot.py" };
-        case SYSID_TEST_RIPPLE_DEBUG:
-            return { "../py-script/ripple_debug_plot.py" };
         case SYSID_TEST_CL_VEL_CHIRP:
         case SYSID_TEST_CL_VEL_PLANT_CHIRP:
             return { "../py-script/closed_vel_bode_plot.py" };
-        case SYSID_TEST_POSITION_STEP:
-            return { "../py-script/position_step_plot.py" };
         case SYSID_TEST_CL_POS_CHIRP:
             return { "../py-script/closed_pos_bode_plot.py" };
-        case SYSID_TEST_CINE_SWEEP:
-            return { "../py-script/cine_overlay_render.py" };
         default:
             return {};
     }

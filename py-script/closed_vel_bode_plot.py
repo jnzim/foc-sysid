@@ -11,9 +11,9 @@ H(s) = vel_meas / vel_cmd directly, and uses its measured -3dB bandwidth
 to recommend a P-only gain for an outer position loop wrapped around it
 (position loop plant = H(s)/s, since velocity integrates to position).
 
-Telemetry mapping (same convention as CL_VEL_STEP):
+Telemetry mapping (SYSID_TEST_CL_VEL_CHIRP / CL_VEL_PLANT_CHIRP):
     sysid_f   -> vel_cmd [mrad/s]
-    iq_cmd_mA -> measured velocity [counts/s]
+    iq_cmd_mA -> measured velocity [counts/s / VEL_TELEM_DIV]
 """
 
 import sys
@@ -222,18 +222,6 @@ elif np.any(plant_phase_ok):
             fc_backed = 1.0 / (2.0 * np.pi * tau_backed)
             print(f"  K   = {K_backed:.3f} rad/s per A")
             print(f"  tau = {tau_backed*1000:.2f} ms  ->  fc = {fc_backed:.2f} Hz")
-
-            # Cross-check against the open-loop chirp fit from this same
-            # bare-motor setup (SYSID_TEST_VEL_CHIRP, >=10.5Hz only,
-            # 0.256A run): K=57.978 rad/s/A, tau=4.10ms, fc=38.84Hz.
-            K_OL, TAU_OL_MS, FC_OL = 57.978, 4.10, 38.84
-            print(f"\n  vs. open-loop chirp fit (same bare motor, 0.256A, >=10.5Hz):")
-            print(f"  K   : backed-out {K_backed:.3f}  vs  OL {K_OL:.3f}  "
-                  f"({(K_backed/K_OL - 1)*100:+.0f}%)")
-            print(f"  tau : backed-out {tau_backed*1000:.2f}ms  vs  OL {TAU_OL_MS:.2f}ms  "
-                  f"({(tau_backed*1000/TAU_OL_MS - 1)*100:+.0f}%)")
-            print(f"  fc  : backed-out {fc_backed:.2f}Hz  vs  OL {FC_OL:.2f}Hz  "
-                  f"({(fc_backed/FC_OL - 1)*100:+.0f}%)")
             plant_fit_ok = True
         except RuntimeError as exc:
             print(f"  fit failed: {exc}")

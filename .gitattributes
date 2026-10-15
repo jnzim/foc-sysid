@@ -1,14 +1,4 @@
-# This repo's actual identity is the C++ SPI capture tool (src/, include/) --
-# the Python scripts are analysis tooling built on top of it, not the project
-# itself. There's more Python by volume (a dozen-plus analysis scripts vs. a
-# few hundred lines of capture code), which flips GitHub's language detection
-# to show Python as primary. Excluding the largest/most superseded analysis
-# scripts from language stats corrects that without hiding Python entirely --
-# the newest, most relevant scripts (closed_pos_bode_plot.py,
-# position_step_plot.py, cine_overlay_render.py, etc.) still count normally.
-py-script/bode_plot.py           linguist-detectable=false
-py-script/bode_vel_plot.py       linguist-detectable=false
-py-script/ripple_debug_plot.py   linguist-detectable=false
-py-script/velocity_step_plot.py  linguist-detectable=false
-py-script/velocity_bode_step.py  linguist-detectable=false
+# Keep GitHub's language stats on the C++ capture tool rather than the Python
+# analysis scripts, which outweigh it by line count.
+py-script/bode_plot.py            linguist-detectable=false
 py-script/closed_vel_bode_plot.py linguist-detectable=false
