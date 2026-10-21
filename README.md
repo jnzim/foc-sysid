@@ -51,7 +51,6 @@ Other scripts in `py-script/`:
 | `plot_observer_vs_boxcar.py` | Velocity observer against the encoder boxcar, from a test 6 capture |
 | `check_sample_window.py` | Offline check of where each ADC sample falls in its phase's low side window |
 | `export_*.py` | Export measured data as JSON for the write-up's charts |
-| `spidump.py` | Clock raw frames off the STM32 and check CRC and byte alignment |
 
 ## Hardware
 

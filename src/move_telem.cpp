@@ -109,76 +109,6 @@ static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[FRAME_LEN],
     return 0;
 }
 
-// Reads `len` raw bytes with an all-zero tx (used by resync below, where
-// we don't care what's on MOSI, only what comes back on MISO).
-static int spi_read_raw(int fd, uint32_t speed_hz, uint8_t *rx, size_t len)
-{
-    std::vector<uint8_t> tx(len, 0);
-    memset(rx, 0, len);
-
-    spi_ioc_transfer tr{};
-    tr.tx_buf        = reinterpret_cast<unsigned long>(tx.data());
-    tr.rx_buf        = reinterpret_cast<unsigned long>(rx);
-    tr.len           = static_cast<uint32_t>(len);
-    tr.speed_hz      = speed_hz;
-    tr.bits_per_word = 8;
-
-    if (spi_xfer(fd, &tr) < 1)
-    {
-        perror("SPI_IOC_MESSAGE");
-        return -1;
-    }
-    return 0;
-}
-
-// The STM's TX DMA is free-running CIRC over a single 32-byte buffer --
-// it just keeps re-transmitting the same bytes on a loop. If the Pi's read
-// window ever slips out of phase with that 32-byte cycle (e.g. after a
-// glitched transaction), every subsequent read decodes a byte-rotated
-// version of the same correct data, which fails CRC *permanently* -- there
-// is nothing on the STM side that forces realignment. This resyncs by
-// reading enough bytes to guarantee a full frame appears at some rotation
-// (32 + 31 = 63 bytes covers all 32 possible rotations), trying each one's
-// CRC, and if exactly one validates, eating the leftover bytes needed to
-// land the *next* plain 32-byte read back on a frame boundary.
-//
-// Only called after several consecutive CRC failures at the current
-// alignment (see the caller) -- a single torn frame is normal bus noise
-// (~3-5% baseline) and does NOT mean the alignment itself is wrong;
-// treating every single torn frame as a phase shift would be wrong and
-// would actively cause misalignment where none existed.
-static bool try_resync(int fd, uint32_t speed_hz, TelemetryFrame *out_frame)
-{
-    static const int SCAN_LEN = FRAME_LEN + (FRAME_LEN - 1);   // 63
-    uint8_t scan[SCAN_LEN];
-    if (spi_read_raw(fd, speed_hz, scan, SCAN_LEN) < 0) return false;
-
-    for (int offset = 0; offset < FRAME_LEN; offset++)
-    {
-        TelemetryFrame candidate;
-        memcpy(&candidate, scan + offset, FRAME_LEN);
-        uint16_t calc = crc16_calc(scan + offset, TELEM_CRC_LEN);
-        if (calc != candidate.crc16) continue;
-
-        // Found a valid frame at byte `offset` within the scan. The next
-        // frame boundary starts right after it, at scan[offset+32]; we've
-        // already read (SCAN_LEN - (offset+32)) bytes of that next frame,
-        // so eat the remainder (offset+1 bytes) to land exactly on it.
-        int catchup_len = offset + 1;
-        if (catchup_len > 0)
-        {
-            uint8_t discard[FRAME_LEN];
-            if (spi_read_raw(fd, speed_hz, discard, catchup_len) < 0) return false;
-        }
-
-        *out_frame = candidate;
-        printf("resync: found alignment at byte offset %d\n", offset);
-        return true;
-    }
-
-    return false;   // corruption too severe to find any valid rotation this attempt
-}
-
 // Builds the 32-byte MoveCmd wire frame for one move.
 static void build_move_cmd(uint8_t frame[FRAME_LEN], uint8_t seq, int32_t target_pos,
                             int32_t vel_max, int32_t accel_max)
@@ -242,17 +172,8 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
 
     uint32_t torn_frames     = 0;
     uint32_t move_cmd_sends  = 0;
-    uint32_t consecutive_torn = 0;
-    uint32_t resync_attempts  = 0;
-    uint32_t resync_successes = 0;
     bool     saw_servo_on   = false;
     bool     faulted        = false;
-
-    // A single torn frame is normal bus noise (~3-5% baseline) and doesn't
-    // mean the byte alignment itself is wrong -- only treat it as a real
-    // phase shift after several in a row, which is exceedingly unlikely
-    // from independent noise alone (~(0.05)^3 for 3 in a row by chance).
-    static const uint32_t RESYNC_THRESHOLD = 3;
 
     const double t0 = now_s();
     const double frame_period_s = 1.0 / TARGET_FRAME_RATE_HZ;
@@ -282,33 +203,13 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
         TelemetryFrame frame;
         memcpy(&frame, rx, FRAME_LEN);
 
+        // Every transaction starts at byte 0 (the STM re-arms on each CS
+        // edge), so a CRC failure is one corrupted frame: drop it, read on.
         uint16_t calc = crc16_calc(rx, TELEM_CRC_LEN);
         if (calc != frame.crc16)
         {
             torn_frames++;
-            consecutive_torn++;
-            if (consecutive_torn >= RESYNC_THRESHOLD)
-            {
-                resync_attempts++;
-                if (try_resync(fd, speed_hz, &frame))
-                {
-                    resync_successes++;
-                    consecutive_torn = 0;
-                    // fall through -- treat this frame as a normal read below
-                }
-                else
-                {
-                    continue;   // still misaligned/corrupted, try again next loop
-                }
-            }
-            else
-            {
-                continue;
-            }
-        }
-        else
-        {
-            consecutive_torn = 0;
+            continue;
         }
 
         samples.push_back({now_s() - t0, frame});
@@ -342,17 +243,17 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
         }
         if (saw_servo_on && frame.drive_state == DRIVE_IDLE)
         {
-            printf("move complete after %zu frames (%u torn, %u/%u resyncs)\n",
-                   samples.size(), torn_frames, resync_successes, resync_attempts);
+            printf("move complete after %zu frames (%u torn)\n",
+                   samples.size(), torn_frames);
             break;
         }
     }
 
     if (!acked)
     {
-        fprintf(stderr, "MoveCmd never acked after %u sends (%u torn frames, "
-                        "%u/%u resyncs) -- check the SPI link, not just this command\n",
-                        move_cmd_sends, torn_frames, resync_successes, resync_attempts);
+        fprintf(stderr, "MoveCmd never acked after %u sends (%u torn frames) "
+                        "-- check the SPI link, not just this command\n",
+                        move_cmd_sends, torn_frames);
     }
 
     if (samples.empty())
@@ -376,8 +277,7 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
                 f.iq_cmd, f.i_q_fbk, f.move_seq);
     }
     fclose(csv);
-    printf("wrote %s (%u torn frames, %u/%u resyncs)\n",
-           OUT_CSV, torn_frames, resync_successes, resync_attempts);
+    printf("wrote %s (%u torn frames)\n", OUT_CSV, torn_frames);
 
     int rc = system("python3 " PLOT_SCRIPT);
     (void)rc;

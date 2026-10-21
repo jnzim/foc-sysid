@@ -16,29 +16,16 @@
  * control ISR, so the next transaction must not start sooner than this.
  * Sized from sysid, the heaviest mode -- see the drive protocol.h. */
 #define SPI2_MIN_CS_GAP_US      120u
-#define CRC16_POLY              0x1021  /* CCITT polynomial */
 
-/* Opcodes — Pi → STM commands and STM → Pi responses */
-#define SPI2_OP_NOP             0x00
-#define SPI2_OP_BLOCK_HDR       0x01
-#define SPI2_OP_DATA            0x02
-#define SPI2_OP_READY_ACK       0x03
-#define SPI2_OP_TELEM_REQ       0x04
-#define SPI2_OP_OPEN_LOOP       0x05
-#define SPI2_OP_STOP            0x06
+/* Opcodes (wire values shared with the STM; never renumber) */
 #define SPI2_OP_MOVE_CMD        0x07  /* single-command move -- see MoveCmd below */
 
-/* Drive state machine values */
+/* Drive state machine values (wire values; 1 and 2 were OPEN_LOOP/ALIGN) */
 #define DRIVE_IDLE              0x00u
-#define DRIVE_OPEN_LOOP         0x01u
-#define DRIVE_ALIGN             0x02u
 #define DRIVE_SERVO_ON          0x03u
 #define DRIVE_FAULT             0x04u
 
-/* Trajectory frame fault flags */
-#define FAULT_TRAJ_CRC          0x01
-#define FAULT_TRAJ_DROP         0x02
-#define FAULT_TRAJ_OVF          0x04
+/* Fault flags */
 #define FAULT_FOLLOWING_ERROR   0x08  /* |pos_cmd - pos_fbk| > FOLLOWING_ERROR_LIMIT (drive config.h) */
 
 /* =============================================================================
@@ -59,49 +46,23 @@ typedef struct __attribute__((packed)) {
     uint8_t  spare;
     int16_t  iq_cmd;            /* mA */
     int16_t  i_q_fbk;           /* mA */
-    uint16_t crc16;             /* covers bytes 0..(offsetof-1) -- TELEM_CRC_LEN below */
+    uint16_t crc16;             /* covers bytes 0..29 -- TELEM_CRC_LEN below */
 } TelemetryFrame;
 
 /* =============================================================================
- * TrajSlot — 32 bytes (fixed-size, DMA-aligned)
+ * MoveCmd — 32 bytes, one per move (SPI2_OP_MOVE_CMD)
  *
- * Pi generates trajectory at 1 kHz, sends 32-byte slots to STM.
- * Ring buffer: 4096 bytes / 32 bytes per slot = 128 slots exact.
- * DMA wrap always lands on slot boundary — no partial packets.
+ * Pi -> STM: one command per move. The STM generates the profile itself
+ * (trap_gen.c or minjerk_gen.c, per TRAJ_PROFILE) from these three numbers.
  *
- * Structure:
- *   [0]      opcode (0x02 = DATA, never scanned in payload)
- *   [1]      seq (sequence number, detects drops)
- *   [2..5]   pos_cmd (int32, counts)
- *   [6..9]   vel_cmd (int32, counts/s feedforward)
- *   [10..13] reserved (future expansion)
- *   [14..15] crc16 (covers bytes 0..13)
- *   [16..31] padding (zeros)
- *
- * Parser: fixed-offset memcpy, validate opcode + CRC.
- * If corrupt: reuse last valid (pos_cmd, vel_cmd) for current DT.
- * Never scan payload for frame delimiters — eliminates 0x01/0x02/0x03 corruption.
- * =============================================================================
- */
-typedef struct __attribute__((packed)) {
-    uint8_t  opcode;      /* 1 */
-    uint8_t  seq;         /* 1 */
-    int32_t  pos_cmd;     /* 4 */
-    int32_t  vel_cmd;     /* 4 */
-    uint32_t reserved;    /* 4 */
-    uint16_t crc16;       /* 2 */
-    uint8_t  padding[16]; /* 16 — total 32 */
-} TrajSlot;
-
-/* =============================================================================
- * MoveCmd — 32 bytes, sent once per move (SPI2_OP_MOVE_CMD)
- *
- * Pi -> STM: one command per move. The STM generates the trapezoidal
- * profile itself (trap_gen.c) from these three numbers -- no streaming.
+ * seq is the handshake: the STM runs a MoveCmd only if its seq differs from
+ * the last one it accepted, and echoes that seq in TelemetryFrame.move_seq.
+ * The Pi picks seq = move_seq + 1 (skipping 0) and resends until the echo
+ * matches, so a lost frame is retried and a repeat is never run twice.
  *
  * Structure:
  *   [0]      opcode (0x07 = MOVE_CMD)
- *   [1]      seq
+ *   [1]      seq (never 0)
  *   [2..5]   target_pos (int32, counts, RELATIVE to wherever the stage
  *            actually is when the move starts -- a delta, not an absolute
  *            position. Sending the same MoveCmd twice moves twice.)
@@ -127,15 +88,12 @@ typedef struct __attribute__((packed)) {
  */
 #ifdef __cplusplus
 static_assert(sizeof(TelemetryFrame) == 32, "TelemetryFrame must be exactly 32 bytes");
-static_assert(sizeof(TrajSlot) == 32, "TrajSlot must be exactly 32 bytes");
 static_assert(sizeof(MoveCmd) == 32, "MoveCmd must be exactly 32 bytes");
 #else
 _Static_assert(sizeof(TelemetryFrame) == 32, "TelemetryFrame must be exactly 32 bytes");
-_Static_assert(sizeof(TrajSlot) == 32, "TrajSlot must be exactly 32 bytes");
 _Static_assert(sizeof(MoveCmd) == 32, "MoveCmd must be exactly 32 bytes");
 #endif
 
-#define TRAJ_CRC_LEN      offsetof(TrajSlot, crc16)
 #define TELEM_CRC_LEN     offsetof(TelemetryFrame, crc16)
 #define MOVE_CMD_CRC_LEN  offsetof(MoveCmd, crc16)
 
@@ -144,6 +102,5 @@ _Static_assert(sizeof(MoveCmd) == 32, "MoveCmd must be exactly 32 bytes");
  * =============================================================================
  */
 uint16_t crc16_calc(const uint8_t* data, size_t len);
-bool crc16_valid(const TrajSlot* s, size_t crc_len);
 
 #endif
