@@ -8,8 +8,9 @@
 //
 // Sequence: pulse the boot-gate GPIO trigger (same one main.cpp uses --
 // the STM blocks at boot until it sees this, regardless of firmware mode),
-// send one MoveCmd as the first SPI transaction, then capture telemetry
-// until the move is done. Sending MoveCmd before the STM's ~5s internal
+// read one valid frame to learn the drive's last accepted seq, send the
+// MoveCmd with the next seq until move_seq echoes it, then capture
+// telemetry until the move is done. Sending MoveCmd before the STM's ~5s internal
 // ALIGN finishes is fine -- foc_trajectory_start_move() (the SPI RX ISR's
 // handler) just latches the request; the position tick won't start the
 // generator until ALIGN completes. See foc_trajectory.c for why that's safe.
@@ -160,14 +161,14 @@ static bool try_resync(int fd, uint32_t speed_hz, TelemetryFrame *out_frame)
 }
 
 // Builds the 32-byte MoveCmd wire frame for one move.
-static void build_move_cmd(uint8_t frame[FRAME_LEN], int32_t target_pos,
+static void build_move_cmd(uint8_t frame[FRAME_LEN], uint8_t seq, int32_t target_pos,
                             int32_t vel_max, int32_t accel_max)
 {
     static_assert(sizeof(MoveCmd) == FRAME_LEN, "MoveCmd must be 32 bytes");
 
     MoveCmd cmd{};
     cmd.opcode     = SPI2_OP_MOVE_CMD;
-    cmd.seq        = 1;
+    cmd.seq        = seq;
     cmd.target_pos = target_pos;
     cmd.vel_max    = vel_max;
     cmd.accel_max  = accel_max;
@@ -210,10 +211,11 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
     lgGpioWrite(gpio_h, PIN_FIRE_SYSID, 1);
     printf("trigger sent, capturing...\n");
 
+    // Built once the first valid frame gives the drive's last accepted seq.
     uint8_t move_frame[FRAME_LEN];
-    build_move_cmd(move_frame, target_pos, vel_max, accel_max);
-    printf("sending MoveCmd (target=%d vel_max=%d accel_max=%d, counts/counts-per-s/counts-per-s^2) "
-           "until SERVO_ON confirms it landed...\n", target_pos, vel_max, accel_max);
+    uint8_t seq      = 0;
+    bool    have_seq = false;
+    bool    acked    = false;
 
     struct Sample { double host_time_s; TelemetryFrame frame; };
     std::vector<Sample> samples;
@@ -250,15 +252,11 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
         if (wait_s > 0.0) usleep(static_cast<useconds_t>(wait_s * 1e6));
         next_frame_time += frame_period_s;
 
-        // Keep resending the MoveCmd every transaction until we see
-        // confirmation it was received (drive_state -> SERVO_ON) --
-        // sending it exactly once meant a single torn transaction (normal,
-        // ~3-5% baseline rate) silently dropped the command with no way to
-        // tell and no retry. A corrupted MoveCmd fails its own CRC on the
-        // STM and is safely ignored either way, and re-latching the same
-        // not-yet-started move is harmless, so resending costs nothing.
+        // Resend the MoveCmd every transaction until move_seq echoes its
+        // seq. A torn transaction just means one more send; the STM ignores
+        // a seq it has already accepted, so a repeat never moves twice.
         uint8_t rx[FRAME_LEN];
-        const uint8_t *tx_override = saw_servo_on ? nullptr : move_frame;
+        const uint8_t *tx_override = (have_seq && !acked) ? move_frame : nullptr;
         if (spi_read_frame(fd, speed_hz, rx, tx_override) < 0) break;
         if (tx_override) move_cmd_sends++;
 
@@ -296,11 +294,24 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
 
         samples.push_back({now_s() - t0, frame});
 
-        if (frame.drive_state == DRIVE_SERVO_ON && !saw_servo_on)
+        if (!have_seq)
         {
-            saw_servo_on = true;
-            printf("MoveCmd confirmed received after %u send(s)\n", move_cmd_sends);
+            // Next seq after the drive's last accepted one. 0 is never sent.
+            seq = static_cast<uint8_t>(frame.move_seq + 1u);
+            if (seq == 0) seq = 1;
+            build_move_cmd(move_frame, seq, target_pos, vel_max, accel_max);
+            have_seq = true;
+            printf("sending MoveCmd seq=%u (target=%d vel_max=%d accel_max=%d, "
+                   "counts/counts-per-s/counts-per-s^2) until move_seq echoes it...\n",
+                   seq, target_pos, vel_max, accel_max);
         }
+        else if (!acked && frame.move_seq == seq)
+        {
+            acked = true;
+            printf("MoveCmd seq=%u acked after %u send(s)\n", seq, move_cmd_sends);
+        }
+        if (frame.drive_state == DRIVE_SERVO_ON)
+            saw_servo_on = true;
         if (saw_servo_on && frame.drive_state == DRIVE_FAULT)
         {
             printf("DRIVE FAULT after %zu frames: fault_flags=0x%02x%s -- bridge is off, "
@@ -318,9 +329,9 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
         }
     }
 
-    if (!saw_servo_on)
+    if (!acked)
     {
-        fprintf(stderr, "MoveCmd never confirmed received after %u sends (%u torn frames, "
+        fprintf(stderr, "MoveCmd never acked after %u sends (%u torn frames, "
                         "%u/%u resyncs) -- check the SPI link, not just this command\n",
                         move_cmd_sends, torn_frames, resync_successes, resync_attempts);
     }
@@ -336,14 +347,14 @@ static int capture_one_move(int fd, int gpio_h, uint32_t speed_hz,
     if (!csv) { perror("fopen csv"); return -1; }
 
     fprintf(csv, "host_time_s,pos_cmd,pos_fbk,vel_cmd,vel_fbk,timestamp_ms,"
-                 "drive_state,fault_flags,samples_consumed,iq_cmd,i_q_fbk\n");
+                 "drive_state,fault_flags,samples_consumed,iq_cmd,i_q_fbk,move_seq\n");
     for (const auto &s : samples)
     {
         const TelemetryFrame &f = s.frame;
-        fprintf(csv, "%.9f,%d,%d,%d,%d,%u,%u,%u,%u,%d,%d\n",
+        fprintf(csv, "%.9f,%d,%d,%d,%d,%u,%u,%u,%u,%d,%d,%u\n",
                 s.host_time_s, f.pos_cmd, f.pos_fbk, f.vel_cmd, f.vel_fbk,
                 f.timestamp_ms, f.drive_state, f.fault_flags, f.samples_consumed,
-                f.iq_cmd, f.i_q_fbk);
+                f.iq_cmd, f.i_q_fbk, f.move_seq);
     }
     fclose(csv);
     printf("wrote %s (%u torn frames, %u/%u resyncs)\n",

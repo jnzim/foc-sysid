@@ -48,7 +48,9 @@ typedef struct __attribute__((packed)) {
     uint32_t timestamp_ms;
     uint8_t  drive_state;       /* DRIVE_IDLE/DRIVE_SERVO_ON/etc above */
     uint8_t  fault_flags;
-    uint32_t samples_consumed;
+    uint16_t samples_consumed;  /* 1 kHz ticks into the move; wraps at 65 s */
+    uint8_t  move_seq;          /* seq of the last MoveCmd accepted (the ack) */
+    uint8_t  spare;
     int16_t  iq_cmd;            /* mA */
     int16_t  i_q_fbk;           /* mA */
     uint16_t crc16;             /* covers bytes 0..(offsetof-1) -- TELEM_CRC_LEN below */
