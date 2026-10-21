@@ -75,12 +75,18 @@ ax.semilogx(f[sel],po[sel],lw=1.8,color=ORANGE,label="observer")
 d=po[sel]-pb[sel]
 ax.set_xlabel("frequency (Hz)",color=MUTED,fontsize=9.5); ax.set_ylabel("phase (deg)",color=MUTED,fontsize=9.5)
 ax.set_title("Closed-loop phase — the whole point",loc="left",fontsize=11,color=INK)
-for ff in (40,95):
-    i=np.argmin(abs(f[sel]-ff))
-    ax.annotate(f"{d[i]:+.0f}° at {ff}Hz",(f[sel][i],po[sel][i]),textcoords="offset points",
-                xytext=(6,10),fontsize=9.5,color=ORANGE,weight="bold")
-for lbl,c,yo in (("boxcar",BLUE,0),("observer",ORANGE,-1)):
-    ax.text(0.02,0.14+yo*0.11,lbl,transform=ax.transAxes,color=c,fontsize=10,weight="bold")
+# Bracket the gap between the two curves at each frequency, so the number
+# reads as "this distance", labelled just above the observer curve.
+for ff,lbl in ((40,"{:.0f}° less lag at 40 Hz"),(95,"{:.0f}° less lag\nat 95 Hz")):
+    i=np.argmin(abs(f[sel]-ff)); x=f[sel][i]
+    ax.vlines(x,pb[sel][i],po[sel][i],color=INK,lw=1.4,zorder=5)
+    ax.plot([x,x],[pb[sel][i],po[sel][i]],ls="",marker="_",ms=9,mew=1.4,color=INK,zorder=5)
+    ax.text(x*1.04,po[sel][i]+4,lbl.format(d[i]),ha="left",va="bottom",
+            fontsize=9.5,color=INK,weight="bold")
+# Label each curve where it is, not in a corner legend.
+j=np.argmin(abs(f[sel]-12))
+ax.text(f[sel][j],po[sel][j]+3,"observer",color=ORANGE,fontsize=10,weight="bold",ha="center",va="bottom")
+ax.text(f[sel][j],pb[sel][j]-4,"boxcar",color=BLUE,fontsize=10,weight="bold",ha="center",va="top")
 
 fig.tight_layout(rect=[0,0,1,0.90])
 fig.savefig("/home/jz/foc-sysid/drive_data/latest/observer_vs_boxcar.png",dpi=150,facecolor=SURF)
