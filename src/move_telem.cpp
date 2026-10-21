@@ -64,6 +64,25 @@ static int spi_open_configure(const char *dev, uint32_t speed_hz)
     return fd;
 }
 
+// The STM re-arms its SPI on every CS rising edge, so CS has to stay high
+// for SPI2_MIN_CS_GAP_US before the next transaction (protocol.h). Every
+// transaction goes through spi_xfer(), which spins out the rest of the gap.
+static int spi_xfer(int fd, const spi_ioc_transfer *tr)
+{
+    static double cs_released_s = 0.0;
+
+    timespec ts{};
+    auto now_s = [&ts]() {
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return ts.tv_sec + ts.tv_nsec / 1e9;
+    };
+
+    while (now_s() - cs_released_s < SPI2_MIN_CS_GAP_US * 1e-6) { }
+    int rc = ioctl(fd, SPI_IOC_MESSAGE(1), tr);
+    cs_released_s = now_s();
+    return rc;
+}
+
 // tx_override, if non-null, rides out on MOSI for this one transaction
 // (used to send the MoveCmd on the very first read of a capture) --
 // simultaneously reads back whatever telemetry is live on MISO, same
@@ -82,7 +101,7 @@ static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[FRAME_LEN],
     tr.speed_hz      = speed_hz;
     tr.bits_per_word = 8;
 
-    if (ioctl(fd, SPI_IOC_MESSAGE(1), &tr) < 1)
+    if (spi_xfer(fd, &tr) < 1)
     {
         perror("SPI_IOC_MESSAGE");
         return -1;
@@ -104,7 +123,7 @@ static int spi_read_raw(int fd, uint32_t speed_hz, uint8_t *rx, size_t len)
     tr.speed_hz      = speed_hz;
     tr.bits_per_word = 8;
 
-    if (ioctl(fd, SPI_IOC_MESSAGE(1), &tr) < 1)
+    if (spi_xfer(fd, &tr) < 1)
     {
         perror("SPI_IOC_MESSAGE");
         return -1;

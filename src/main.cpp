@@ -223,6 +223,19 @@ static int spi_open_configure(const char *dev, uint32_t speed_hz)
     return fd;
 }
 
+// The STM re-arms its SPI on every CS rising edge, so CS has to stay high
+// for SPI2_MIN_CS_GAP_US before the next transaction (protocol.h). Every
+// transaction goes through spi_xfer(), which spins out the rest of the gap.
+static int spi_xfer(int fd, const spi_ioc_transfer *tr)
+{
+    static double cs_released_s = 0.0;
+
+    while (monotonic_seconds() - cs_released_s < SPI2_MIN_CS_GAP_US * 1e-6) { }
+    int rc = ioctl(fd, SPI_IOC_MESSAGE(1), tr);
+    cs_released_s = monotonic_seconds();
+    return rc;
+}
+
 // Shift the frame boundary by n bytes.
 //
 // The STM32's TX DMA free-runs in a circle over one frame and the Pi clocks 32
@@ -248,7 +261,7 @@ static int spi_shift_bytes(int fd, uint32_t speed_hz, int n)
     tr.bits_per_word = 8;
     tr.delay_usecs   = 0;
 
-    return (ioctl(fd, SPI_IOC_MESSAGE(1), &tr) < 1) ? -1 : 0;
+    return (spi_xfer(fd, &tr) < 1) ? -1 : 0;
 }
 
 
@@ -265,7 +278,7 @@ static int spi_read_frame(int fd, uint32_t speed_hz, uint8_t rx[SYSID_FRAME_LEN]
     tr.bits_per_word = 8;
     tr.delay_usecs   = 0;
 
-    if (ioctl(fd, SPI_IOC_MESSAGE(1), &tr) < 1)
+    if (spi_xfer(fd, &tr) < 1)
     {
         std::perror("SPI_IOC_MESSAGE");
         return -1;

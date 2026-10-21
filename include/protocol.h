@@ -10,6 +10,12 @@
  * =============================================================================
  */
 #define SPI2_TRANSACTION_BYTES  32u
+
+/* Minimum CS-high time between transactions. The STM re-arms SPI2 on every
+ * CS rising edge (drive spi.c); that handler can wait behind the 20 kHz
+ * control ISR, so the next transaction must not start sooner than this.
+ * Sized from sysid, the heaviest mode -- see the drive protocol.h. */
+#define SPI2_MIN_CS_GAP_US      120u
 #define CRC16_POLY              0x1021  /* CCITT polynomial */
 
 /* Opcodes — Pi → STM commands and STM → Pi responses */
