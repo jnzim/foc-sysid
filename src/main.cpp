@@ -78,6 +78,7 @@
 #define SYSID_TEST_CURRENT_LOOP_CHIRP  0u
 #define SYSID_TEST_CL_CURRENT_CHIRP    3u
 #define SYSID_TEST_CL_VEL_CHIRP        6u
+#define SYSID_TEST_POSITION_STEP       7u
 #define SYSID_TEST_CL_POS_CHIRP        8u
 #define SYSID_TEST_FRICTION_SWEEP      12u
 #define SYSID_TEST_CL_VEL_PLANT_CHIRP  14u
@@ -375,6 +376,8 @@ static std::vector<const char *> plot_scripts_for_test(uint16_t test_id)
             return { "../py-script/closed_vel_bode_plot.py" };
         case SYSID_TEST_CL_POS_CHIRP:
             return { "../py-script/closed_pos_bode_plot.py" };
+        case SYSID_TEST_POSITION_STEP:
+            return { "../py-script/position_step_plot.py" };
         default:
             return {};
     }
